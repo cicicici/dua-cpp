@@ -966,7 +966,7 @@ private:
         // Header
         attron(A_REVERSE);
         mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 1, " Disk Usage Analyzer v2.30.1 [C++]    (press ? for help)");
+        mvprintw(0, 1, " Disk Usage Analyzer v1.0.1 [C++]    (press ? for help)");
         attroff(A_REVERSE);
         
         // Path bar

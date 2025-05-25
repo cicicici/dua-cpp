@@ -100,7 +100,7 @@ endif
 # VERSION INFORMATION
 # ============================================================================
 
-VERSION = 2.30.1-cpp
+VERSION = 1.0.1
 GIT_HASH = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE = $(shell date +%Y-%m-%d)
 
@@ -153,6 +153,7 @@ MANDIR = $(PREFIX)/share/man/man1
 .PHONY: all clean debug release static install uninstall help
 .PHONY: test test-interactive test-aggregate test-memory
 .PHONY: format lint check show-config
+.PHONY: push push-safe commit-push
 
 # ============================================================================
 # DEFAULT TARGET
@@ -272,6 +273,27 @@ check: lint
 	cppcheck --enable=all --suppress=missingIncludeSystem $(SOURCES)
 
 # ============================================================================
+# GIT OPERATIONS
+# ============================================================================
+
+push:
+	@echo "Pushing to origin/main..."
+	git push -u origin main
+	@echo "Push complete!"
+
+# Optional: Add a target that runs checks before pushing
+push-safe: check-pre-push
+	@echo "All checks passed, pushing to origin/main..."
+	git push -u origin main
+	@echo "Push complete!"
+
+# Optional: Add commit and push in one command
+commit-push:
+	@echo "Enter commit message: "; \
+	read MSG; \
+	git add -A && git commit -m "$$MSG" && git push -u origin main
+
+# ============================================================================
 # TESTING TARGETS
 # ============================================================================
 
@@ -336,23 +358,28 @@ help:
 	@echo "  make lint         - Run clang-tidy"
 	@echo "  make check        - Run static analysis"
 	@echo ""
+	@echo "Git targets:"
+	@echo "  push              - Push to origin/main"
+	@echo "  push-safe         - Run checks then push"
+	@echo "  commit-push       - Add, commit, and push all changes"
+	@echo ""
 	@echo "Testing:"
 	@echo "  make test         - Run basic tests"
 	@echo "  make test-memory  - Check for memory leaks"
 	@echo ""
 	@echo "Options:"
-	@echo "  DEBUG=1          - Enable debug build"
-	@echo "  STATIC=1         - Enable static linking"
-	@echo "  LTO=1            - Enable link-time optimization"
-	@echo "  NATIVE=1         - Enable CPU-specific optimizations"
-	@echo "  CXX=clang++      - Use different compiler"
-	@echo "  PREFIX=/opt      - Change installation prefix"
+	@echo "  DEBUG=1           - Enable debug build"
+	@echo "  STATIC=1          - Enable static linking"
+	@echo "  LTO=1             - Enable link-time optimization"
+	@echo "  NATIVE=1          - Enable CPU-specific optimizations"
+	@echo "  CXX=clang++       - Use different compiler"
+	@echo "  PREFIX=/opt       - Change installation prefix"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make DEBUG=1                    # Debug build"
-	@echo "  make STATIC=1 LTO=1            # Static optimized build"
-	@echo "  make CXX=clang++ release       # Use clang++ for release"
-	@echo "  make PREFIX=~/.local install   # Install to home directory"
+	@echo "  make STATIC=1 LTO=1             # Static optimized build"
+	@echo "  make CXX=clang++ release        # Use clang++ for release"
+	@echo "  make PREFIX=~/.local install    # Install to home directory"
 
 # ============================================================================
 # CONFIGURATION DISPLAY
