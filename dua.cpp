@@ -213,9 +213,17 @@ private:
         }
         
         uintmax_t total = 0;
-        std::lock_guard<std::mutex> lock(entry->children_mutex);
-        for (auto& child : entry->children) {
-            total += calculate_sizes(child);
+        {
+            std::lock_guard<std::mutex> lock(entry->children_mutex);
+            for (auto& child : entry->children) {
+                total += calculate_sizes(child);
+            }
+            
+            // Sort children by size (descending) after calculating sizes
+            std::sort(entry->children.begin(), entry->children.end(),
+                [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
+                    return a->size.load() > b->size.load();
+                });
         }
         
         entry->size = total;
@@ -341,6 +349,14 @@ private:
     bool show_help = false;
     std::vector<std::shared_ptr<Entry>> navigation_stack;
     
+    enum class SortMode {
+        SIZE_DESC,
+        SIZE_ASC,
+        NAME_ASC,
+        NAME_DESC
+    };
+    SortMode sort_mode = SortMode::SIZE_DESC;
+    
 public:
     InteractiveUI(std::shared_ptr<Entry> root_entry) : root(root_entry) {
         current_dir = root;
@@ -456,8 +472,42 @@ public:
 private:
     void update_view() {
         current_view.clear();
-        std::lock_guard<std::mutex> lock(current_dir->children_mutex);
-        current_view = current_dir->children;
+        {
+            std::lock_guard<std::mutex> lock(current_dir->children_mutex);
+            current_view = current_dir->children;
+        }
+        
+        // Apply current sort mode
+        apply_sort();
+    }
+    
+    void apply_sort() {
+        switch (sort_mode) {
+            case SortMode::SIZE_DESC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->size.load() > b->size.load(); 
+                    });
+                break;
+            case SortMode::SIZE_ASC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->size.load() < b->size.load(); 
+                    });
+                break;
+            case SortMode::NAME_ASC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->path.filename() < b->path.filename(); 
+                    });
+                break;
+            case SortMode::NAME_DESC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->path.filename() > b->path.filename(); 
+                    });
+                break;
+        }
     }
     
     void draw() {
@@ -564,7 +614,14 @@ private:
         mvhline(LINES - 2, 0, ' ', COLS);
         
         // Left side - sort mode
-        mvprintw(LINES - 2, 1, "Sort mode: size descending");
+        std::string sort_str = "Sort mode: ";
+        switch (sort_mode) {
+            case SortMode::SIZE_DESC: sort_str += "size descending"; break;
+            case SortMode::SIZE_ASC: sort_str += "size ascending"; break;
+            case SortMode::NAME_ASC: sort_str += "name ascending"; break;
+            case SortMode::NAME_DESC: sort_str += "name descending"; break;
+        }
+        mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
         
         // Center - total disk usage
         std::string total_str = "Total disk usage: " + OptimizedScanner::format_size(current_dir->size);
@@ -657,7 +714,7 @@ private:
                     dir->size -= removed_size;
                 }
                 
-                update_view();
+                update_view();  // This will re-apply the current sort
                 if (selected_index >= current_view.size() && selected_index > 0) {
                     selected_index--;
                 }
@@ -673,21 +730,23 @@ private:
     }
     
     void sort_by_size() {
-        std::lock_guard<std::mutex> lock(current_dir->children_mutex);
-        std::sort(current_dir->children.begin(), current_dir->children.end(),
-            [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
-                return a->size.load() > b->size.load(); 
-            });
-        update_view();
+        // Toggle between descending and ascending
+        if (sort_mode == SortMode::SIZE_DESC) {
+            sort_mode = SortMode::SIZE_ASC;
+        } else {
+            sort_mode = SortMode::SIZE_DESC;
+        }
+        apply_sort();
     }
     
     void sort_by_name() {
-        std::lock_guard<std::mutex> lock(current_dir->children_mutex);
-        std::sort(current_dir->children.begin(), current_dir->children.end(),
-            [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
-                return a->path.filename() < b->path.filename(); 
-            });
-        update_view();
+        // Toggle between ascending and descending
+        if (sort_mode == SortMode::NAME_ASC) {
+            sort_mode = SortMode::NAME_DESC;
+        } else {
+            sort_mode = SortMode::NAME_ASC;
+        }
+        apply_sort();
     }
     
     void refresh_current_directory() {
