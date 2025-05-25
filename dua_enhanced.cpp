@@ -1,5 +1,5 @@
-// dua_enhanced.cpp - Enhanced Disk Usage Analyzer in C++
-// Reimplementation of dua-cli with additional features
+// dua_enhanced_v7.cpp - Enhanced Disk Usage Analyzer with all features and deadlock prevention
+// Complete reimplementation of dua-cli with additional features and robustness improvements
 
 #include <iostream>
 #include <filesystem>
@@ -25,6 +25,7 @@
 #include <fstream>
 #include <set>
 #include <unistd.h>  // For isatty()
+#include <deque>
 
 #ifdef __linux__
 #include <sys/stat.h>
@@ -45,8 +46,9 @@ namespace fs = std::filesystem;
 // Constants for performance tuning
 constexpr size_t THREAD_POOL_SIZE = 0;  // 0 = auto-detect
 constexpr size_t BATCH_SIZE = 256;      // Files to process per batch
-constexpr size_t QUEUE_SIZE_LIMIT = 10000;
+constexpr size_t QUEUE_SIZE_LIMIT = 50000;  // Increased to reduce blocking
 constexpr size_t PREALLOCATE_ENTRIES = 100;
+constexpr auto FS_TIMEOUT = std::chrono::seconds(5);  // Timeout for filesystem operations
 
 // ANSI color codes
 const std::string RESET = "\033[0m";
@@ -62,7 +64,7 @@ const std::string GRAY = "\033[90m";
 const std::string CLEAR_LINE = "\033[2K\r";
 
 // Forward declarations
-class ThreadPool;
+class WorkStealingThreadPool;
 class OptimizedScanner;
 class InteractiveUI;
 struct Entry;
@@ -96,10 +98,10 @@ struct Config {
 // Progress throttle class
 class ProgressThrottle {
 private:
-    std::chrono::steady_clock::time_point last_update;
+    mutable std::chrono::steady_clock::time_point last_update;
     std::chrono::milliseconds update_interval;
     bool is_tty;
-    std::mutex mutex;
+    mutable std::mutex mutex;
     
 public:
     ProgressThrottle(std::chrono::milliseconds interval = std::chrono::milliseconds(100)) 
@@ -108,7 +110,7 @@ public:
         last_update = std::chrono::steady_clock::now();
     }
     
-    bool should_update() {
+    bool should_update() const {
         if (!is_tty) return false;
         
         std::lock_guard<std::mutex> lock(mutex);
@@ -120,7 +122,7 @@ public:
         return false;
     }
     
-    void clear_line() {
+    void clear_line() const {
         if (is_tty) {
             std::cerr << CLEAR_LINE << std::flush;
         }
@@ -310,58 +312,105 @@ bool glob_match(const std::string& pattern, const std::string& text) {
     }
 }
 
-// High-performance thread pool (reused from original)
-class ThreadPool {
+// Work-stealing thread pool to prevent deadlocks
+class WorkStealingThreadPool {
 private:
-    std::vector<std::thread> workers;
-    std::queue<std::function<void()>> tasks;
-    std::mutex queue_mutex;
-    std::condition_variable condition;
-    std::condition_variable finished;
-    std::atomic<bool> stop{false};
-    std::atomic<size_t> active_tasks{0};
-    std::atomic<size_t> queued_tasks{0};
+    struct WorkQueue {
+        std::deque<std::function<void()>> tasks;
+        std::mutex mutex;
+        std::atomic<size_t> size{0};
+    };
     
-public:
-    ThreadPool(size_t threads = 0) {
-        if (threads == 0) {
-            threads = std::thread::hardware_concurrency();
-            if (threads == 0) threads = 4;
+    std::vector<std::thread> workers;
+    std::vector<std::unique_ptr<WorkQueue>> queues;
+    std::condition_variable work_available;
+    std::mutex global_mutex;
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> active_workers{0};
+    std::atomic<size_t> total_tasks{0};
+    const size_t num_threads;
+    
+    // Steal work from other queues
+    bool try_steal(size_t thief_id, std::function<void()>& task) {
+        // Try to steal from other queues in round-robin fashion
+        for (size_t i = 1; i < num_threads; ++i) {
+            size_t victim_id = (thief_id + i) % num_threads;
+            auto& victim_queue = queues[victim_id];
             
-            // Special handling for macOS - use 3 threads for better performance
-#ifdef __APPLE__
-            threads = 3;
-#endif
-        }
-        
-        for (size_t i = 0; i < threads; ++i) {
-            workers.emplace_back([this] {
-                for (;;) {
-                    std::function<void()> task;
-                    
-                    {
-                        std::unique_lock<std::mutex> lock(queue_mutex);
-                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
-                        
-                        if (stop && tasks.empty()) return;
-                        
-                        task = std::move(tasks.front());
-                        tasks.pop();
-                        queued_tasks--;
-                        active_tasks++;
-                    }
-                    
-                    task();
-                    active_tasks--;
-                    finished.notify_all();
+            if (victim_queue->size.load() > 0) {
+                std::unique_lock<std::mutex> lock(victim_queue->mutex, std::try_to_lock);
+                if (lock.owns_lock() && !victim_queue->tasks.empty()) {
+                    // Steal from the back (FIFO for stolen tasks)
+                    task = std::move(victim_queue->tasks.back());
+                    victim_queue->tasks.pop_back();
+                    victim_queue->size--;
+                    return true;
                 }
-            });
+            }
+        }
+        return false;
+    }
+    
+    void worker_thread(size_t id) {
+        auto& my_queue = queues[id];
+        
+        while (!stop) {
+            std::function<void()> task;
+            
+            // First, try to get work from own queue
+            {
+                std::unique_lock<std::mutex> lock(my_queue->mutex);
+                if (!my_queue->tasks.empty()) {
+                    task = std::move(my_queue->tasks.front());
+                    my_queue->tasks.pop_front();
+                    my_queue->size--;
+                }
+            }
+            
+            // If no work in own queue, try to steal
+            if (!task && !try_steal(id, task)) {
+                // No work available anywhere, wait
+                std::unique_lock<std::mutex> lock(global_mutex);
+                work_available.wait_for(lock, std::chrono::milliseconds(10),
+                    [this] { return stop.load() || total_tasks.load() > 0; });
+                continue;
+            }
+            
+            if (task) {
+                active_workers++;
+                task();
+                active_workers--;
+                total_tasks--;
+            }
         }
     }
     
-    ~ThreadPool() {
+public:
+    explicit WorkStealingThreadPool(size_t threads = 0) 
+        : num_threads(threads == 0 ? std::thread::hardware_concurrency() : threads) {
+        
+        size_t actual_threads = num_threads;
+        if (actual_threads == 0) actual_threads = 4;
+        
+        // Special handling for macOS - use 3 threads for better performance
+#ifdef __APPLE__
+        actual_threads = std::min(actual_threads, size_t(3));
+#endif
+        
+        // Create per-thread queues
+        for (size_t i = 0; i < actual_threads; ++i) {
+            queues.emplace_back(std::make_unique<WorkQueue>());
+        }
+        
+        // Start worker threads
+        for (size_t i = 0; i < actual_threads; ++i) {
+            workers.emplace_back(&WorkStealingThreadPool::worker_thread, this, i);
+        }
+    }
+    
+    ~WorkStealingThreadPool() {
         stop = true;
-        condition.notify_all();
+        work_available.notify_all();
         for (auto& worker : workers) {
             worker.join();
         }
@@ -369,37 +418,56 @@ public:
     
     template<class F>
     void enqueue(F&& f) {
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex);
-            finished.wait(lock, [this] { return queued_tasks < QUEUE_SIZE_LIMIT || stop; });
-            if (stop) return;
+        if (stop) return;
+        
+        // Use round-robin to distribute tasks
+        static std::atomic<size_t> next_queue{0};
+        size_t queue_id = next_queue.fetch_add(1) % num_threads;
+        
+        // Try to find a queue with space
+        size_t attempts = 0;
+        while (attempts < num_threads) {
+            auto& queue = queues[queue_id % queues.size()];
             
-            tasks.emplace(std::forward<F>(f));
-            queued_tasks++;
+            if (queue->size.load() < QUEUE_SIZE_LIMIT / num_threads) {
+                std::lock_guard<std::mutex> lock(queue->mutex);
+                queue->tasks.emplace_back(std::forward<F>(f));
+                queue->size++;
+                total_tasks++;
+                work_available.notify_one();
+                return;
+            }
+            
+            queue_id = (queue_id + 1) % num_threads;
+            attempts++;
         }
-        condition.notify_one();
+        
+        // All queues are full - execute directly to prevent deadlock
+        f();
     }
     
     void wait_all() {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        finished.wait(lock, [this] { return tasks.empty() && active_tasks == 0; });
+        while (total_tasks.load() > 0 || active_workers.load() > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     }
 };
 
-// Enhanced scanner with hard link tracking
+// Enhanced scanner with timeout protection and deadlock prevention
 class OptimizedScanner {
 private:
-    ThreadPool& pool;
+    WorkStealingThreadPool& pool;
     Config& config;
     std::atomic<uintmax_t> total_size{0};
     std::atomic<size_t> file_count{0};
     std::atomic<size_t> dir_count{0};
     std::atomic<size_t> io_errors{0};
     std::atomic<size_t> entries_traversed{0};
+    std::atomic<size_t> skipped_entries{0};
     std::chrono::steady_clock::time_point start_time;
     ProgressThrottle progress_throttle;
     std::string current_path;
-    std::mutex current_path_mutex;
+    mutable std::mutex current_path_mutex;
     
     // Hard link tracking
     struct InodeKey {
@@ -419,6 +487,10 @@ private:
     
     std::unordered_map<InodeKey, size_t, InodeKeyHash> inode_map;
     std::mutex inode_mutex;
+    
+    // Directory cache to prevent revisiting
+    std::unordered_set<std::string> visited_dirs;
+    std::mutex visited_mutex;
     
     bool should_count_entry(const Entry& entry) {
         if (!config.count_hard_links && entry.hard_link_count > 1) {
@@ -442,12 +514,21 @@ private:
             canonical_path = path;
         }
         
+        // Check if already visited (prevents symlink loops)
+        {
+            std::lock_guard<std::mutex> lock(visited_mutex);
+            if (!visited_dirs.insert(canonical_path.string()).second) {
+                return true;  // Already visited
+            }
+        }
+        
         return config.ignore_dirs.find(canonical_path) != config.ignore_dirs.end();
     }
     
-    void update_progress() {
+    void update_progress() const {
         if (config.show_progress && progress_throttle.should_update()) {
             size_t current_entries = entries_traversed.load();
+            size_t skipped = skipped_entries.load();
             std::string path_display;
             
             {
@@ -457,95 +538,144 @@ private:
             
             // Format the progress message with shortened path
             std::string shortened = shorten_path(path_display);
-            std::cerr << "\rEnumerating " << current_entries << " items - " 
-                      << shortened << std::flush;
+            std::cerr << "\rEnumerating " << current_entries << " items";
+            if (skipped > 0) {
+                std::cerr << " (skipped " << skipped << ")";
+            }
+            std::cerr << " - " << shortened << std::flush;
+        }
+    }
+    
+    // Non-blocking directory iteration with timeout
+    bool try_iterate_directory(const fs::path& dir_path, 
+                              std::vector<fs::directory_entry>& entries) {
+        try {
+            // Use a future for timeout control
+            auto future = std::async(std::launch::async, [&]() {
+                try {
+                    for (const auto& entry : fs::directory_iterator(dir_path,
+                            fs::directory_options::skip_permission_denied)) {
+                        entries.push_back(entry);
+                    }
+                    return true;
+                } catch (...) {
+                    return false;
+                }
+            });
+            
+            // Wait with timeout
+            if (future.wait_for(FS_TIMEOUT) == std::future_status::ready) {
+                return future.get();
+            } else {
+                // Timeout occurred
+                skipped_entries++;
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    void scan_directory_batch(std::shared_ptr<Entry> parent, 
+                            const std::vector<fs::directory_entry>& batch,
+                            dev_t root_device) {
+        for (const auto& item : batch) {
+            try {
+                auto child = std::make_shared<Entry>(item.path());
+                
+                // Update current path for progress display
+                {
+                    std::lock_guard<std::mutex> lock(current_path_mutex);
+                    current_path = item.path().string();
+                }
+                
+                // Check filesystem boundary
+                if (config.stay_on_filesystem && child->device_id != root_device) {
+                    continue;
+                }
+                
+                if (child->is_symlink) {
+                    continue;
+                }
+                
+                entries_traversed++;
+                update_progress();
+                
+                if (item.is_directory()) {
+                    child->is_directory = true;
+                    dir_count++;
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(parent->children_mutex);
+                        parent->children.push_back(child);
+                    }
+                    
+                    // Schedule directory scanning
+                    pool.enqueue([this, child, root_device]() {
+                        scan_directory_impl(child, root_device);
+                    });
+                } else if (item.is_regular_file()) {
+                    child->apparent_size = item.file_size();
+                    
+                    if (should_count_entry(*child)) {
+                        if (config.apparent_size) {
+                            child->size = child->apparent_size.load();
+                        } else {
+                            child->size = get_size_on_disk(child->path, child->apparent_size);
+                        }
+                        file_count++;
+                        parent->entry_count++;
+                    }
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(parent->children_mutex);
+                        parent->children.push_back(child);
+                    }
+                    
+                    parent->size += child->size.load();
+                }
+            } catch (const fs::filesystem_error&) {
+                io_errors++;
+            }
         }
     }
     
     void scan_directory_impl(std::shared_ptr<Entry> entry, dev_t root_device) {
-        try {
-            if (entry->is_symlink) {
-                return;
-            }
-            
-            if (should_ignore_directory(entry->path)) {
-                return;
-            }
-            
-            // Update current path for progress display
-            {
-                std::lock_guard<std::mutex> lock(current_path_mutex);
-                current_path = entry->path.string();
-            }
-            
-            std::vector<fs::directory_entry> entries;
-            entries.reserve(BATCH_SIZE);
-            
-            for (const auto& item : fs::directory_iterator(entry->path, 
-                    fs::directory_options::skip_permission_denied)) {
-                entries.push_back(item);
-            }
-            
-            for (const auto& item : entries) {
-                try {
-                    auto child = std::make_shared<Entry>(item.path());
-                    
-                    // Update current path for progress display
-                    {
-                        std::lock_guard<std::mutex> lock(current_path_mutex);
-                        current_path = item.path().string();
-                    }
-                    
-                    // Check filesystem boundary
-                    if (config.stay_on_filesystem && child->device_id != root_device) {
-                        continue;
-                    }
-                    
-                    if (child->is_symlink) {
-                        continue;
-                    }
-                    
-                    entries_traversed++;
-                    update_progress();
-                    
-                    if (item.is_directory()) {
-                        child->is_directory = true;
-                        dir_count++;
-                        
-                        {
-                            std::lock_guard<std::mutex> lock(entry->children_mutex);
-                            entry->children.push_back(child);
-                        }
-                        
-                        pool.enqueue([this, child, root_device]() {
-                            scan_directory_impl(child, root_device);
-                        });
-                    } else if (item.is_regular_file()) {
-                        child->apparent_size = item.file_size();
-                        
-                        if (should_count_entry(*child)) {
-                            if (config.apparent_size) {
-                                child->size = child->apparent_size.load();
-                            } else {
-                                child->size = get_size_on_disk(child->path, child->apparent_size);
-                            }
-                            file_count++;
-                            entry->entry_count++;
-                        }
-                        
-                        {
-                            std::lock_guard<std::mutex> lock(entry->children_mutex);
-                            entry->children.push_back(child);
-                        }
-                        
-                        entry->size += child->size.load();
-                    }
-                } catch (const fs::filesystem_error&) {
-                    io_errors++;
-                }
-            }
-        } catch (const fs::filesystem_error&) {
+        if (entry->is_symlink || should_ignore_directory(entry->path)) {
+            return;
+        }
+        
+        // Update current path for progress display
+        {
+            std::lock_guard<std::mutex> lock(current_path_mutex);
+            current_path = entry->path.string();
+        }
+        
+        std::vector<fs::directory_entry> entries;
+        entries.reserve(BATCH_SIZE * 2);
+        
+        // Try to iterate directory with timeout
+        if (!try_iterate_directory(entry->path, entries)) {
             io_errors++;
+            return;
+        }
+        
+        // Process entries in batches to improve parallelism
+        std::vector<fs::directory_entry> batch;
+        batch.reserve(BATCH_SIZE);
+        
+        for (const auto& item : entries) {
+            batch.push_back(item);
+            
+            if (batch.size() >= BATCH_SIZE) {
+                scan_directory_batch(entry, batch, root_device);
+                batch.clear();
+            }
+        }
+        
+        // Process remaining items
+        if (!batch.empty()) {
+            scan_directory_batch(entry, batch, root_device);
         }
     }
     
@@ -577,7 +707,7 @@ private:
     }
     
 public:
-    OptimizedScanner(ThreadPool& tp, Config& cfg) 
+    OptimizedScanner(WorkStealingThreadPool& tp, Config& cfg) 
         : pool(tp), config(cfg), progress_throttle(std::chrono::milliseconds(100)) {
         start_time = std::chrono::steady_clock::now();
     }
@@ -634,6 +764,9 @@ public:
                   << dir_count << " directories in " << ms << "ms\n";
         if (io_errors > 0) {
             std::cerr << "Encountered " << io_errors << " I/O errors\n";
+        }
+        if (skipped_entries > 0) {
+            std::cerr << "Skipped " << skipped_entries << " unresponsive directories\n";
         }
         std::cerr << "Total size: " << format_size(total_size, config.format) << "\n";
     }
@@ -960,7 +1093,7 @@ private:
                 refresh();
                 
                 // Re-scan directory
-                ThreadPool pool(config.thread_count);
+                WorkStealingThreadPool pool(config.thread_count);
                 OptimizedScanner scanner(pool, config);
                 
                 // Clear existing children
@@ -988,7 +1121,7 @@ private:
         mvprintw(LINES / 2, COLS / 2 - 10, "Refreshing all...");
         refresh();
         
-        ThreadPool pool(config.thread_count);
+        WorkStealingThreadPool pool(config.thread_count);
         OptimizedScanner scanner(pool, config);
         
         if (roots.size() > 1) {
@@ -1563,7 +1696,7 @@ void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config
 
 // Aggregate mode (non-interactive summary)
 void aggregate_mode(Config& config) {
-    ThreadPool pool(config.thread_count);
+    WorkStealingThreadPool pool(config.thread_count);
     OptimizedScanner scanner(pool, config);
     
     auto roots = scanner.scan(config.paths);
@@ -1750,7 +1883,7 @@ int main(int argc, char* argv[]) {
     
     // Run appropriate mode
     if (config.interactive_mode) {
-        ThreadPool pool(config.thread_count);
+        WorkStealingThreadPool pool(config.thread_count);
         OptimizedScanner scanner(pool, config);
         
         auto start = std::chrono::high_resolution_clock::now();
