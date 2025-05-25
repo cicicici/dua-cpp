@@ -130,15 +130,15 @@ public:
 };
 
 // Helper function to shorten paths for display
-// Preserves first 20 and last 20 characters for long paths
+// Preserves first 30 and last 30 characters for long paths
 std::string shorten_path(const std::string& path, size_t max_length = 45) {
     if (path.length() <= max_length) {
         return path;
     }
     
-    // For paths longer than max_length, show first 20 and last 20 chars
-    const size_t prefix_len = 20;
-    const size_t suffix_len = 20;
+    // For paths longer than max_length, show first 30 and last 30 chars
+    const size_t prefix_len = 30;
+    const size_t suffix_len = 30;
     const std::string ellipsis = "...";
     
     // Make sure we have enough characters
@@ -1229,7 +1229,7 @@ private:
         // Header
         attron(A_REVERSE);
         mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 1, " Disk Usage Analyzer v1.0.1 [C++]    (press ? for help)");
+        mvprintw(0, 1, " Disk Usage Analyzer v1.0.2 [C++]    (press ? for help)");
         attroff(A_REVERSE);
         
         // Path bar

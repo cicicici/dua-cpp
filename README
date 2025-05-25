@@ -118,6 +118,9 @@ dua --no-colors | less
 
 # Interactive mode for system directories
 sudo dua -i /
+
+# Scan Mac OS root volume, without scanning other volumes
+dua -A -x -i /Volumes/Macintosh/Volumes -i /Volumes/Macintosh/System/Volumes /Volumes/Macintosh/
 ```
 
 ## Performance
