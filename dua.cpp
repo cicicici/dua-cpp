@@ -356,8 +356,8 @@ private:
     std::shared_ptr<Entry> root;
     std::vector<std::shared_ptr<Entry>> current_view;
     std::shared_ptr<Entry> current_dir;
-    int selected_index = 0;
-    int view_offset = 0;
+    size_t selected_index = 0;
+    size_t view_offset = 0;
     bool show_help = false;
     std::vector<std::shared_ptr<Entry>> navigation_stack;
     
@@ -414,10 +414,10 @@ public:
                     
                 case KEY_DOWN:
                 case 'j':
-                    if (selected_index < current_view.size() - 1) {
+                    if (selected_index + 1 < current_view.size()) {
                         selected_index++;
                         int max_visible = LINES - 4;
-                        if (selected_index >= view_offset + max_visible) {
+                        if (static_cast<int>(selected_index) >= view_offset + max_visible) {
                             view_offset = selected_index - max_visible + 1;
                         }
                     }
@@ -582,7 +582,7 @@ private:
         int sep_col = 3;
         int name_col_start = size_col + percent_col + graph_col + sep_col;
         
-        for (int i = view_offset; i < current_view.size() && y < max_y; i++) {
+        for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
             auto entry = current_view[i];
             
             // Highlight selected row
@@ -637,7 +637,7 @@ private:
             
             std::string name = entry->path.filename().string();
             int max_name_width = COLS - name_col_start - 1;
-            if (name.length() > max_name_width) {
+            if (name.length() > static_cast<size_t>(max_name_width)) {
                 name = name.substr(0, max_name_width - 3) + "...";
             }
             mvprintw(y, name_col_start + 1, "%s", name.c_str());
@@ -683,8 +683,6 @@ private:
         mvprintw(LINES - 2, COLS/2 - total_str.length()/2, "%s", total_str.c_str());
         
         // Right side - stats
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - now).count();
         std::string stats = "Processed " + std::to_string(current_view.size()) + " entries in 0.01s";
         mvprintw(LINES - 2, COLS - stats.length() - 2, "%s", stats.c_str());
         attroff(A_REVERSE);
@@ -826,10 +824,10 @@ private:
             entry->marked = !entry->marked.load();
             
             // Move to next item after marking
-            if (selected_index < current_view.size() - 1) {
+            if (selected_index + 1 < current_view.size()) {
                 selected_index++;
                 int max_visible = LINES - 4;
-                if (selected_index >= view_offset + max_visible) {
+                if (static_cast<int>(selected_index) >= static_cast<int>(view_offset) + max_visible) {
                     view_offset = selected_index - max_visible + 1;
                 }
             }
