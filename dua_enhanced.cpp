@@ -58,6 +58,19 @@ const std::string CYAN = "\033[36m";
 const std::string BOLD = "\033[1m";
 const std::string GRAY = "\033[90m";
 
+// Forward declarations
+class ThreadPool;
+class OptimizedScanner;
+class InteractiveUI;
+struct Entry;
+struct Config;
+
+// Function declarations with default parameters
+void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config,
+                      const std::string& prefix = "", bool is_last = true, 
+                      int depth = 0, std::vector<std::shared_ptr<Entry>>* siblings = nullptr);
+void aggregate_mode(Config& config);
+
 // Configuration structure
 struct Config {
     bool interactive_mode = false;
@@ -66,7 +79,8 @@ struct Config {
     bool stay_on_filesystem = false;
     bool no_entry_check = false;
     bool use_trash = false;
-    bool no_colors = true;  // ncurses handles colors in interactive mode
+    bool no_colors = false;  // Default to colors enabled
+    bool tree_mode = false;  // Display as tree instead of flat list
     int max_depth = -1;
     int top_n = -1;
     size_t thread_count = 0;
@@ -1334,6 +1348,98 @@ private:
     }
 };
 
+// Tree printing function - provides visual hierarchy of disk usage
+// Note: Default parameters are specified in the forward declaration above
+void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config,
+                      const std::string& prefix, bool is_last, 
+                      int depth, std::vector<std::shared_ptr<Entry>>* siblings) {
+    // Check depth limit
+    if (config.max_depth >= 0 && depth > config.max_depth) return;
+    
+    // Print current entry with tree graphics
+    std::cout << prefix;
+    
+    // Tree branch characters
+    if (depth > 0) {
+        std::cout << (is_last ? "└── " : "├── ");
+    }
+    
+    // Apply directory coloring
+    bool is_dir = entry->is_directory;
+    if (!config.no_colors && is_dir) {
+        std::cout << BLUE << BOLD;
+    }
+    
+    // Print the name
+    std::string name = entry->path.filename().string();
+    if (name.empty() && depth == 0) {
+        // Root path - show full path
+        name = entry->path.string();
+    }
+    std::cout << name;
+    
+    if (!config.no_colors && is_dir) {
+        std::cout << RESET;
+    }
+    
+    // Print size information
+    std::cout << " ";
+    
+    if (!config.no_colors) {
+        std::cout << YELLOW;
+    }
+    
+    std::cout << "[" << format_size(entry->size, config.format) << "]";
+    
+    if (!config.no_colors) {
+        std::cout << RESET;
+    }
+    
+    std::cout << "\n";
+    
+    // Get and sort children
+    std::vector<std::shared_ptr<Entry>> children_copy;
+    {
+        std::lock_guard<std::mutex> lock(entry->children_mutex);
+        children_copy = entry->children;
+    }
+    
+    // Sort children by size (descending)
+    std::sort(children_copy.begin(), children_copy.end(),
+        [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
+            return a->size.load() > b->size.load();
+        });
+    
+    // Apply top-n limit if specified
+    size_t limit = children_copy.size();
+    if (config.top_n > 0 && limit > static_cast<size_t>(config.top_n)) {
+        limit = static_cast<size_t>(config.top_n);
+    }
+    
+    // Print children recursively
+    for (size_t i = 0; i < limit; i++) {
+        bool child_is_last = (i == limit - 1);
+        std::string child_prefix = prefix + (is_last ? "    " : "│   ");
+        
+        print_tree_sorted(children_copy[i], config, child_prefix, child_is_last, 
+                         depth + 1, &children_copy);
+    }
+    
+    // Show omitted entries if any
+    if (config.top_n > 0 && children_copy.size() > static_cast<size_t>(config.top_n)) {
+        std::string omit_prefix = prefix + (is_last ? "    " : "│   ");
+        std::cout << omit_prefix << "└── ";
+        if (!config.no_colors) {
+            std::cout << GRAY;
+        }
+        std::cout << "... " << (children_copy.size() - limit) << " more entries";
+        if (!config.no_colors) {
+            std::cout << RESET;
+        }
+        std::cout << "\n";
+    }
+}
+
 // Aggregate mode (non-interactive summary)
 void aggregate_mode(Config& config) {
     ThreadPool pool(config.thread_count);
@@ -1341,40 +1447,72 @@ void aggregate_mode(Config& config) {
     
     auto roots = scanner.scan(config.paths);
     
-    // Sort by size if requested
-    std::sort(roots.begin(), roots.end(),
-        [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
-            return a->size.load() < b->size.load();
-        });
-    
-    // Print results
-    for (auto& root : roots) {
-        std::cout << std::setw(12) << std::right 
-                  << format_size(root->size, config.format) << " ";
+    // Check if tree mode is requested
+    if (config.tree_mode) {
+        // Tree mode - show hierarchical view
+        std::cout << "\n";  // Add spacing before tree output
         
-        if (!config.no_colors && root->is_directory) {
-            std::cout << CYAN;
+        if (roots.size() == 1) {
+            // Single root - print it directly
+            print_tree_sorted(roots[0], config);
+        } else {
+            // Multiple roots - create a virtual root
+            auto virtual_root = std::make_shared<Entry>("[Total]");
+            virtual_root->is_directory = true;
+            
+            for (auto& root : roots) {
+                virtual_root->children.push_back(root);
+                virtual_root->size += root->size.load();
+                virtual_root->entry_count += root->entry_count.load();
+            }
+            
+            // Sort the roots by size
+            std::sort(virtual_root->children.begin(), virtual_root->children.end(),
+                [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
+                    return a->size.load() > b->size.load();
+                });
+            
+            print_tree_sorted(virtual_root, config);
         }
         
-        std::cout << root->path;
+        std::cout << "\n";  // Add spacing after tree output
+    } else {
+        // Flat mode - original aggregate output
+        // Sort by size if requested
+        std::sort(roots.begin(), roots.end(),
+            [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
+                return a->size.load() < b->size.load();
+            });
         
-        if (!config.no_colors && root->is_directory) {
-            std::cout << RESET;
-        }
-        
-        std::cout << "\n";
-    }
-    
-    // Print total if multiple paths
-    if (roots.size() > 1) {
-        uintmax_t total = 0;
+        // Print results
         for (auto& root : roots) {
-            total += root->size.load();
+            std::cout << std::setw(12) << std::right 
+                      << format_size(root->size, config.format) << " ";
+            
+            if (!config.no_colors && root->is_directory) {
+                std::cout << CYAN;
+            }
+            
+            std::cout << root->path;
+            
+            if (!config.no_colors && root->is_directory) {
+                std::cout << RESET;
+            }
+            
+            std::cout << "\n";
         }
         
-        std::cout << std::setw(12) << std::right 
-                  << format_size(total, config.format) << " ";
-        std::cout << "total\n";
+        // Print total if multiple paths
+        if (roots.size() > 1) {
+            uintmax_t total = 0;
+            for (auto& root : roots) {
+                total += root->size.load();
+            }
+            
+            std::cout << std::setw(12) << std::right 
+                      << format_size(total, config.format) << " ";
+            std::cout << "total\n";
+        }
     }
     
     scanner.print_stats();
@@ -1393,6 +1531,7 @@ void print_usage(const char* program_name) {
     std::cout << "  -x, --stay-on-filesystem Don't cross filesystem boundaries\n";
     std::cout << "  -d, --depth N           Maximum depth to traverse\n";
     std::cout << "  -t, --top N             Show only top N entries by size\n";
+    std::cout << "  -T, --tree              Display results as a tree (aggregate mode)\n";
     std::cout << "  -f, --format FMT        Output format: metric, binary, bytes, gb, gib, mb, mib\n";
     std::cout << "  -j, --threads N         Number of threads (default: auto)\n";
     std::cout << "  -i, --ignore-dirs DIR   Directories to ignore (can be repeated)\n";
@@ -1437,6 +1576,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < args.size()) {
                 config.top_n = std::stoi(args[++i]);
             }
+        } else if (arg == "-T" || arg == "--tree") {
+            config.tree_mode = true;
         } else if (arg == "-f" || arg == "--format") {
             if (i + 1 < args.size()) {
                 config.format = args[++i];
@@ -1457,6 +1598,10 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg[0] != '-') {
             config.paths.push_back(arg);
+        } else {
+            std::cerr << "Unknown option: " << arg << "\n";
+            std::cerr << "Try '" << argv[0] << " --help' for more information.\n";
+            return 1;
         }
     }
     
@@ -1473,8 +1618,9 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Default to interactive mode if no subcommand specified
-    if (subcommand.empty() && isatty(fileno(stdout))) {
+    // Default to interactive mode if no subcommand specified and on TTY
+    // BUT: if tree mode is requested, always use aggregate mode
+    if (subcommand.empty() && !config.tree_mode && isatty(fileno(stdout))) {
         config.interactive_mode = true;
     }
     
