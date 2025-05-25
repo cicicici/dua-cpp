@@ -1,5 +1,6 @@
 // dua_enhanced_optimized.cpp - Enhanced Disk Usage Analyzer with optimized UI performance
 // Complete reimplementation of dua-cli with additional features and robustness improvements
+// Version 1.1.0 - Added symlink display support
 
 #include <iostream>
 #include <filesystem>
@@ -56,6 +57,7 @@ const std::string RED = "\033[31m";
 const std::string GREEN = "\033[32m";
 const std::string YELLOW = "\033[33m";
 const std::string BLUE = "\033[34m";
+const std::string MAGENTA = "\033[35m";  // Added for symlinks
 const std::string CYAN = "\033[36m";
 const std::string BOLD = "\033[1m";
 const std::string GRAY = "\033[90m";
@@ -150,13 +152,14 @@ std::string shorten_path(const std::string& path, size_t max_length = 45) {
            path.substr(path.length() - suffix_len);
 }
 
-// Enhanced entry structure with more metadata
+// Enhanced entry structure with symlink support
 struct Entry {
     fs::path path;
     std::atomic<uintmax_t> size{0};
     std::atomic<uintmax_t> apparent_size{0};
     bool is_directory{false};
     bool is_symlink{false};
+    fs::path symlink_target;  // Added to store where the symlink points
     std::vector<std::shared_ptr<Entry>> children;
     mutable std::mutex children_mutex;
     fs::file_time_type last_modified;
@@ -172,10 +175,22 @@ struct Entry {
             if (fs::exists(path)) {
                 auto status = fs::symlink_status(path);
                 is_symlink = fs::is_symlink(status);
-                if (!is_symlink) {
+                
+                if (is_symlink) {
+                    // Get the symlink target - this is crucial for display
+                    try {
+                        symlink_target = fs::read_symlink(path);
+                    } catch (...) {
+                        // Handle broken symlinks gracefully
+                        symlink_target = fs::path("[unreadable]");
+                    }
+                    // Symlinks don't have meaningful modification times
+                    last_modified = fs::file_time_type{};
+                } else {
+                    // Regular files and directories
                     last_modified = fs::last_write_time(path);
                     
-                    // Get inode information
+                    // Get inode information for regular files/dirs
 #ifdef __linux__
                     struct stat st;
                     if (stat(path.c_str(), &st) == 0) {
@@ -462,7 +477,7 @@ public:
     }
 };
 
-// Enhanced scanner with timeout protection and deadlock prevention
+// Enhanced scanner with timeout protection and symlink handling
 class OptimizedScanner {
 private:
     WorkStealingThreadPool& pool;
@@ -470,6 +485,7 @@ private:
     std::atomic<uintmax_t> total_size{0};
     std::atomic<size_t> file_count{0};
     std::atomic<size_t> dir_count{0};
+    std::atomic<size_t> symlink_count{0};  // Added counter for symlinks
     std::atomic<size_t> io_errors{0};
     std::atomic<size_t> entries_traversed{0};
     std::atomic<size_t> skipped_entries{0};
@@ -598,19 +614,30 @@ private:
                     current_path = item.path().string();
                 }
                 
-                // Check filesystem boundary
-                if (config.stay_on_filesystem && child->device_id != root_device) {
-                    continue;
-                }
-                
-                if (child->is_symlink) {
+                // Check filesystem boundary (but not for symlinks)
+                if (!child->is_symlink && config.stay_on_filesystem && 
+                    child->device_id != root_device) {
                     continue;
                 }
                 
                 entries_traversed++;
                 update_progress();
                 
-                if (item.is_directory()) {
+                if (child->is_symlink) {
+                    // Handle symlinks - add them to the tree but don't follow
+                    symlink_count++;  // Track symlink count
+                    
+                    // Symlinks have no meaningful size - this is important
+                    // because the actual symlink file is tiny (just stores a path)
+                    child->size = 0;
+                    child->apparent_size = 0;
+                    child->entry_count = 0;
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(parent->children_mutex);
+                        parent->children.push_back(child);
+                    }
+                } else if (item.is_directory()) {
                     child->is_directory = true;
                     dir_count++;
                     
@@ -769,8 +796,9 @@ public:
         auto duration = std::chrono::steady_clock::now() - start_time;
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
         
-        std::cerr << "\nScanned " << file_count << " files and " 
-                  << dir_count << " directories in " << ms << "ms\n";
+        std::cerr << "\nScanned " << file_count << " files, " 
+                  << dir_count << " directories, and " 
+                  << symlink_count << " symlinks in " << ms << "ms\n";
         if (io_errors > 0) {
             std::cerr << "Encountered " << io_errors << " I/O errors\n";
         }
@@ -794,7 +822,7 @@ struct LineCache {
     }
 };
 
-// Interactive UI with enhanced features
+// Interactive UI with enhanced features including symlink display
 class InteractiveUI {
 private:
     std::vector<std::shared_ptr<Entry>> roots;
@@ -895,6 +923,7 @@ public:
             init_pair(6, COLOR_YELLOW, COLOR_BLACK);  // Percentage
             init_pair(7, COLOR_BLUE, COLOR_BLACK);    // Help
             init_pair(8, COLOR_RED, COLOR_BLACK);     // Marked
+            init_pair(9, COLOR_MAGENTA, COLOR_BLACK); // Symlinks
         }
         
         bool running = true;
@@ -1012,7 +1041,8 @@ private:
     void enter_directory() {
         if (selected_index < current_view.size()) {
             auto selected = current_view[selected_index];
-            if (selected->is_directory && !selected->children.empty()) {
+            // Can only enter directories, not symlinks
+            if (selected->is_directory && !selected->is_symlink && !selected->children.empty()) {
                 current_dir = selected;
                 navigation_stack.push_back(current_dir);
                 update_view();
@@ -1112,7 +1142,7 @@ private:
             matches.push_back(root);
         }
         
-        if (root->is_directory) {
+        if (root->is_directory && !root->is_symlink) {
             std::lock_guard<std::mutex> lock(root->children_mutex);
             for (auto& child : root->children) {
                 search_entries(child, pattern, matches);
@@ -1123,7 +1153,7 @@ private:
     void refresh_selected() {
         if (selected_index < current_view.size()) {
             auto selected = current_view[selected_index];
-            if (selected->is_directory) {
+            if (selected->is_directory && !selected->is_symlink) {
                 // Show progress
                 clear();
                 mvprintw(LINES / 2, COLS / 2 - 10, "Refreshing...");
@@ -1415,13 +1445,17 @@ private:
         mvprintw(y, col_x, " | ");
         col_x += 3;
         
-        // Name
-        if (entry->is_directory && !is_selected) {
+        // Name with appropriate styling for entry type
+        if (entry->is_symlink && !is_selected) {
+            attron(COLOR_PAIR(9));  // Magenta for symlinks
+        } else if (entry->is_directory && !is_selected) {
             attron(COLOR_PAIR(1) | A_BOLD);
         }
+        
         mvprintw(y, col_x, "%s", cached.formatted_name.c_str());
-        if (entry->is_directory && !is_selected) {
-            attroff(COLOR_PAIR(1) | A_BOLD);
+        
+        if ((entry->is_symlink || entry->is_directory) && !is_selected) {
+            attroff(COLOR_PAIR(entry->is_symlink ? 9 : 1) | (entry->is_directory ? A_BOLD : 0));
         }
         
         // Turn off selection highlighting
@@ -1441,7 +1475,7 @@ private:
         cached.percentage = (current_dir->size > 0) ? 
             (static_cast<double>(entry->size.load()) / current_dir->size.load() * 100.0) : 0.0;
         
-        if (show_mtime) {
+        if (show_mtime && !entry->is_symlink) {  // Symlinks don't have meaningful mtime
             auto time_since_epoch = entry->last_modified.time_since_epoch();
             auto seconds = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch).count();
             time_t time_t_val = static_cast<time_t>(seconds);
@@ -1450,24 +1484,53 @@ private:
             strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", 
                     localtime(&time_t_val));
             cached.formatted_time = time_buf;
+        } else if (entry->is_symlink) {
+            cached.formatted_time = "[symlink]";
         }
         
         std::string name = entry->path.filename().string();
         if (name.empty()) name = entry->path.string();
         
-        if (entry->is_directory) {
+        if (entry->is_symlink) {
+            // Format symlinks with an arrow pointing to their target
+            // This is the key visual indicator that helps users understand what they're looking at
+            cached.formatted_name = " " + name + " -> " + entry->symlink_target.string();
+        } else if (entry->is_directory) {
             cached.formatted_name = "/" + name;
         } else {
             cached.formatted_name = " " + name;
         }
         
+        // Adjust for available width
         int available_width = COLS - 45;
         if (show_mtime) available_width -= 23;
         if (show_count) available_width -= 11;
         
         if (cached.formatted_name.length() > static_cast<size_t>(available_width) && available_width > 3) {
-            cached.formatted_name = "..." + 
-                cached.formatted_name.substr(cached.formatted_name.length() - available_width + 3);
+            // For symlinks, try to preserve the arrow part if possible
+            if (entry->is_symlink) {
+                size_t arrow_pos = cached.formatted_name.find(" -> ");
+                if (arrow_pos != std::string::npos) {
+                    // Try to show both name and target with ellipsis
+                    std::string symlink_part = cached.formatted_name.substr(0, arrow_pos);
+                    std::string target_part = cached.formatted_name.substr(arrow_pos);
+                    
+                    int remaining = available_width - target_part.length() - 3;
+                    if (remaining > 10) {
+                        // Show end of symlink name and full target
+                        cached.formatted_name = "..." + 
+                            symlink_part.substr(symlink_part.length() - remaining + 3) + 
+                            target_part;
+                    } else {
+                        // Just truncate the whole thing
+                        cached.formatted_name = "..." + 
+                            cached.formatted_name.substr(cached.formatted_name.length() - available_width + 3);
+                    }
+                }
+            } else {
+                cached.formatted_name = "..." + 
+                    cached.formatted_name.substr(cached.formatted_name.length() - available_width + 3);
+            }
         }
         
         cached.needs_update = false;
@@ -1511,7 +1574,7 @@ private:
         // Header
         attron(A_REVERSE);
         mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 1, " Disk Usage Analyzer v1.0.2 [C++ Optimized]    (press ? for help)");
+        mvprintw(0, 1, " Disk Usage Analyzer v1.1.0 [C++ Optimized]    (press ? for help)");
         attroff(A_REVERSE);
         
         // Path bar
@@ -1774,7 +1837,7 @@ private:
             count++;
         }
         
-        if (root->is_directory) {
+        if (root->is_directory && !root->is_symlink) {
             std::lock_guard<std::mutex> lock(root->children_mutex);
             for (auto& child : root->children) {
                 count_marked_recursive(child, count);
@@ -1791,7 +1854,7 @@ private:
     void calculate_marked_size_recursive(std::shared_ptr<Entry> root, uintmax_t& total) {
         if (root->marked.load()) {
             total += root->size.load();
-        } else if (root->is_directory) {
+        } else if (root->is_directory && !root->is_symlink) {
             std::lock_guard<std::mutex> lock(root->children_mutex);
             for (auto& child : root->children) {
                 calculate_marked_size_recursive(child, total);
@@ -1821,7 +1884,7 @@ private:
             
             for (auto& entry : marked_entries) {
                 try {
-                    if (entry->is_directory) {
+                    if (entry->is_directory && !entry->is_symlink) {
                         fs::remove_all(entry->path);
                     } else {
                         fs::remove(entry->path);
@@ -1849,7 +1912,7 @@ private:
                                std::vector<std::shared_ptr<Entry>>& marked) {
         if (root->marked.load()) {
             marked.push_back(root);
-        } else if (root->is_directory) {
+        } else if (root->is_directory && !root->is_symlink) {
             std::lock_guard<std::mutex> lock(root->children_mutex);
             for (auto& child : root->children) {
                 collect_marked_entries(child, marked);
@@ -1877,8 +1940,7 @@ private:
     }
 };
 
-// Tree printing function - provides visual hierarchy of disk usage
-// Note: Default parameters are specified in the forward declaration above
+// Tree printing function with symlink support
 void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config,
                       const std::string& prefix, bool is_last, 
                       int depth, std::vector<std::shared_ptr<Entry>>* siblings) {
@@ -1893,25 +1955,33 @@ void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config
         std::cout << (is_last ? "└── " : "├── ");
     }
     
-    // Apply directory coloring
-    bool is_dir = entry->is_directory;
-    if (!config.no_colors && is_dir) {
-        std::cout << BLUE << BOLD;
+    // Apply appropriate coloring
+    if (!config.no_colors) {
+        if (entry->is_symlink) {
+            std::cout << MAGENTA;  // Magenta for symlinks
+        } else if (entry->is_directory) {
+            std::cout << BLUE << BOLD;
+        }
     }
     
     // Print the name
     std::string name = entry->path.filename().string();
     if (name.empty() && depth == 0) {
-        // Root path - show full path
         name = entry->path.string();
     }
+    
     std::cout << name;
     
-    if (!config.no_colors && is_dir) {
+    // For symlinks, show the target - this makes it clear what the symlink points to
+    if (entry->is_symlink) {
+        std::cout << " -> " << entry->symlink_target.string();
+    }
+    
+    if (!config.no_colors && (entry->is_symlink || entry->is_directory)) {
         std::cout << RESET;
     }
     
-    // Print size information
+    // Print size information (symlinks show as 0)
     std::cout << " ";
     
     if (!config.no_colors) {
@@ -1926,46 +1996,49 @@ void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config
     
     std::cout << "\n";
     
-    // Get and sort children
-    std::vector<std::shared_ptr<Entry>> children_copy;
-    {
-        std::lock_guard<std::mutex> lock(entry->children_mutex);
-        children_copy = entry->children;
-    }
-    
-    // Sort children by size (descending)
-    std::sort(children_copy.begin(), children_copy.end(),
-        [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
-            return a->size.load() > b->size.load();
-        });
-    
-    // Apply top-n limit if specified
-    size_t limit = children_copy.size();
-    if (config.top_n > 0 && limit > static_cast<size_t>(config.top_n)) {
-        limit = static_cast<size_t>(config.top_n);
-    }
-    
-    // Print children recursively
-    for (size_t i = 0; i < limit; i++) {
-        bool child_is_last = (i == limit - 1);
-        std::string child_prefix = prefix + (is_last ? "    " : "│   ");
+    // Only process children for directories (not symlinks, even if they point to directories)
+    if (entry->is_directory && !entry->is_symlink) {
+        // Get and sort children
+        std::vector<std::shared_ptr<Entry>> children_copy;
+        {
+            std::lock_guard<std::mutex> lock(entry->children_mutex);
+            children_copy = entry->children;
+        }
         
-        print_tree_sorted(children_copy[i], config, child_prefix, child_is_last, 
-                         depth + 1, &children_copy);
-    }
-    
-    // Show omitted entries if any
-    if (config.top_n > 0 && children_copy.size() > static_cast<size_t>(config.top_n)) {
-        std::string omit_prefix = prefix + (is_last ? "    " : "│   ");
-        std::cout << omit_prefix << "└── ";
-        if (!config.no_colors) {
-            std::cout << GRAY;
+        // Sort children by size (descending)
+        std::sort(children_copy.begin(), children_copy.end(),
+            [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) {
+                return a->size.load() > b->size.load();
+            });
+        
+        // Apply top-n limit if specified
+        size_t limit = children_copy.size();
+        if (config.top_n > 0 && limit > static_cast<size_t>(config.top_n)) {
+            limit = static_cast<size_t>(config.top_n);
         }
-        std::cout << "... " << (children_copy.size() - limit) << " more entries";
-        if (!config.no_colors) {
-            std::cout << RESET;
+        
+        // Print children recursively
+        for (size_t i = 0; i < limit; i++) {
+            bool child_is_last = (i == limit - 1);
+            std::string child_prefix = prefix + (is_last ? "    " : "│   ");
+            
+            print_tree_sorted(children_copy[i], config, child_prefix, child_is_last, 
+                             depth + 1, &children_copy);
         }
-        std::cout << "\n";
+        
+        // Show omitted entries if any
+        if (config.top_n > 0 && children_copy.size() > static_cast<size_t>(config.top_n)) {
+            std::string omit_prefix = prefix + (is_last ? "    " : "│   ");
+            std::cout << omit_prefix << "└── ";
+            if (!config.no_colors) {
+                std::cout << GRAY;
+            }
+            std::cout << "... " << (children_copy.size() - limit) << " more entries";
+            if (!config.no_colors) {
+                std::cout << RESET;
+            }
+            std::cout << "\n";
+        }
     }
 }
 
@@ -2018,13 +2091,22 @@ void aggregate_mode(Config& config) {
             std::cout << std::setw(12) << std::right 
                       << format_size(root->size, config.format) << " ";
             
-            if (!config.no_colors && root->is_directory) {
-                std::cout << CYAN;
+            if (!config.no_colors) {
+                if (root->is_symlink) {
+                    std::cout << MAGENTA;
+                } else if (root->is_directory) {
+                    std::cout << CYAN;
+                }
             }
             
             std::cout << root->path;
             
-            if (!config.no_colors && root->is_directory) {
+            // Show symlink target in aggregate mode too
+            if (root->is_symlink) {
+                std::cout << " -> " << root->symlink_target.string();
+            }
+            
+            if (!config.no_colors && (root->is_symlink || root->is_directory)) {
                 std::cout << RESET;
             }
             

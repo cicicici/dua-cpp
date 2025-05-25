@@ -100,7 +100,7 @@ endif
 # VERSION INFORMATION
 # ============================================================================
 
-VERSION = 1.0.2
+VERSION = 1.1.0
 GIT_HASH = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE = $(shell date +%Y-%m-%d)
 
