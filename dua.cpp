@@ -50,6 +50,7 @@ struct Entry {
     std::vector<std::shared_ptr<Entry>> children;
     mutable std::mutex children_mutex;
     fs::file_time_type last_modified;
+    std::atomic<bool> marked{false};
     
     Entry(const fs::path& p = "") : path(p) {
         children.reserve(PREALLOCATE_ENTRIES);
@@ -450,8 +451,19 @@ public:
                     }
                     break;
                     
+                case ' ':
+                    toggle_mark();
+                    break;
+                    
+                case 'a':
+                case 'A':
+                    toggle_all_marks();
+                    break;
+                    
                 case 'd':
-                    if (selected_index < current_view.size()) {
+                    if (has_marked_items()) {
+                        delete_marked_entries();
+                    } else if (selected_index < current_view.size()) {
                         delete_entry(current_view[selected_index]);
                     }
                     break;
@@ -579,6 +591,13 @@ private:
                 mvhline(y, 0, ' ', COLS);
             }
             
+            // Mark indicator
+            if (entry->marked.load()) {
+                attron(A_BOLD);
+                mvprintw(y, 0, "*");
+                attroff(A_BOLD);
+            }
+            
             // Size column (green)
             attron(COLOR_PAIR(3));
             std::string size_str = OptimizedScanner::format_size(entry->size);
@@ -650,8 +669,17 @@ private:
         }
         mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
         
-        // Center - total disk usage
+        // Center - total disk usage and marked items info
         std::string total_str = "Total disk usage: " + OptimizedScanner::format_size(current_dir->size);
+        
+        // Add marked items info if any
+        size_t marked_count = count_marked_items();
+        if (marked_count > 0) {
+            uintmax_t marked_size = calculate_marked_size();
+            total_str += " | Marked: " + std::to_string(marked_count) + 
+                         " (" + OptimizedScanner::format_size(marked_size) + ")";
+        }
+        
         mvprintw(LINES - 2, COLS/2 - total_str.length()/2, "%s", total_str.c_str());
         
         // Right side - stats
@@ -694,9 +722,9 @@ private:
         mvprintw(help_y + 7, help_x + 4, "←/h/Bksp    Go back");
         
         mvprintw(help_y + 3, help_x + 32, "Actions:");
-        mvprintw(help_y + 4, help_x + 34, "d         Delete selected");
-        mvprintw(help_y + 5, help_x + 34, "space     Mark/unmark");
-        mvprintw(help_y + 6, help_x + 34, "a         Toggle all marks");
+        mvprintw(help_y + 4, help_x + 34, "space     Mark/unmark");
+        mvprintw(help_y + 5, help_x + 34, "a         Toggle all marks");
+        mvprintw(help_y + 6, help_x + 34, "d         Delete marked/selected");
         
         mvprintw(help_y + 9, help_x + 2, "Sorting:");
         mvprintw(help_y + 10, help_x + 4, "s         Sort by size");
@@ -790,6 +818,134 @@ private:
         // This would require re-scanning just the current directory
         // For now, just update the view
         update_view();
+    }
+    
+    void toggle_mark() {
+        if (selected_index < current_view.size()) {
+            auto entry = current_view[selected_index];
+            entry->marked = !entry->marked.load();
+            
+            // Move to next item after marking
+            if (selected_index < current_view.size() - 1) {
+                selected_index++;
+                int max_visible = LINES - 4;
+                if (selected_index >= view_offset + max_visible) {
+                    view_offset = selected_index - max_visible + 1;
+                }
+            }
+        }
+    }
+    
+    void toggle_all_marks() {
+        bool any_marked = false;
+        for (auto& entry : current_view) {
+            if (entry->marked.load()) {
+                any_marked = true;
+                break;
+            }
+        }
+        
+        // If any are marked, unmark all. Otherwise, mark all.
+        for (auto& entry : current_view) {
+            entry->marked = !any_marked;
+        }
+    }
+    
+    bool has_marked_items() {
+        for (const auto& entry : current_view) {
+            if (entry->marked.load()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    size_t count_marked_items() {
+        size_t count = 0;
+        for (const auto& entry : current_view) {
+            if (entry->marked.load()) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
+    uintmax_t calculate_marked_size() {
+        uintmax_t total = 0;
+        for (const auto& entry : current_view) {
+            if (entry->marked.load()) {
+                total += entry->size.load();
+            }
+        }
+        return total;
+    }
+    
+    void delete_marked_entries() {
+        std::vector<std::shared_ptr<Entry>> marked_entries;
+        for (const auto& entry : current_view) {
+            if (entry->marked.load()) {
+                marked_entries.push_back(entry);
+            }
+        }
+        
+        if (marked_entries.empty()) return;
+        
+        // Confirmation dialog
+        clear();
+        mvprintw(LINES / 2 - 3, COLS / 2 - 20, "Delete %zu marked items?", marked_entries.size());
+        mvprintw(LINES / 2 - 1, COLS / 2 - 20, "Total size: %s", 
+                 OptimizedScanner::format_size(calculate_marked_size()).c_str());
+        mvprintw(LINES / 2 + 1, COLS / 2 - 20, "This action cannot be undone!");
+        mvprintw(LINES / 2 + 3, COLS / 2 - 20, "Press 'y' to confirm, any other key to cancel");
+        refresh();
+        
+        int ch = getch();
+        if (ch == 'y' || ch == 'Y') {
+            size_t deleted_count = 0;
+            uintmax_t deleted_size = 0;
+            
+            for (auto& entry : marked_entries) {
+                try {
+                    if (entry->is_directory) {
+                        fs::remove_all(entry->path);
+                    } else {
+                        fs::remove(entry->path);
+                    }
+                    
+                    deleted_size += entry->size.load();
+                    deleted_count++;
+                    
+                    // Remove from parent's children
+                    {
+                        std::lock_guard<std::mutex> lock(current_dir->children_mutex);
+                        current_dir->children.erase(
+                            std::remove(current_dir->children.begin(), current_dir->children.end(), entry),
+                            current_dir->children.end()
+                        );
+                    }
+                } catch (const fs::filesystem_error& e) {
+                    // Continue with other files even if one fails
+                }
+            }
+            
+            // Update parent sizes
+            for (auto& dir : navigation_stack) {
+                dir->size -= deleted_size;
+            }
+            
+            update_view();
+            
+            // Adjust selected index if needed
+            if (selected_index >= current_view.size() && selected_index > 0) {
+                selected_index = current_view.size() - 1;
+            }
+            
+            // Show result
+            clear();
+            mvprintw(LINES / 2, COLS / 2 - 20, "Deleted %zu items successfully!", deleted_count);
+            refresh();
+            getch();
+        }
     }
 };
 
