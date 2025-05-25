@@ -328,13 +328,14 @@ private:
     std::atomic<bool> stop{false};
     std::atomic<size_t> active_workers{0};
     std::atomic<size_t> total_tasks{0};
-    const size_t num_threads;
+    size_t num_threads;  // Changed from const to mutable
     
     // Steal work from other queues
     bool try_steal(size_t thief_id, std::function<void()>& task) {
         // Try to steal from other queues in round-robin fashion
-        for (size_t i = 1; i < num_threads; ++i) {
-            size_t victim_id = (thief_id + i) % num_threads;
+        const size_t actual_threads = queues.size();  // Use actual queue count
+        for (size_t i = 1; i < actual_threads; ++i) {
+            size_t victim_id = (thief_id + i) % actual_threads;
             auto& victim_queue = queues[victim_id];
             
             if (victim_queue->size.load() > 0) {
@@ -386,24 +387,31 @@ private:
     }
     
 public:
-    explicit WorkStealingThreadPool(size_t threads = 0) 
-        : num_threads(threads == 0 ? std::thread::hardware_concurrency() : threads) {
-        
-        size_t actual_threads = num_threads;
-        if (actual_threads == 0) actual_threads = 4;
+    explicit WorkStealingThreadPool(size_t threads = 0) {
+        // Determine the actual number of threads to use
+        num_threads = threads;
+        if (num_threads == 0) {
+            num_threads = std::thread::hardware_concurrency();
+            if (num_threads == 0) num_threads = 4;
+        }
         
         // Special handling for macOS - use 3 threads for better performance
 #ifdef __APPLE__
-        actual_threads = std::min(actual_threads, size_t(3));
+        num_threads = std::min(num_threads, size_t(3));
 #endif
         
+        // Important: Ensure num_threads matches the actual number of queues
+        // This prevents out-of-bounds access
+        
         // Create per-thread queues
-        for (size_t i = 0; i < actual_threads; ++i) {
+        queues.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
             queues.emplace_back(std::make_unique<WorkQueue>());
         }
         
         // Start worker threads
-        for (size_t i = 0; i < actual_threads; ++i) {
+        workers.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
             workers.emplace_back(&WorkStealingThreadPool::worker_thread, this, i);
         }
     }
@@ -422,14 +430,15 @@ public:
         
         // Use round-robin to distribute tasks
         static std::atomic<size_t> next_queue{0};
-        size_t queue_id = next_queue.fetch_add(1) % num_threads;
+        const size_t actual_threads = queues.size();  // Always use actual queue count
+        size_t queue_id = next_queue.fetch_add(1) % actual_threads;
         
         // Try to find a queue with space
         size_t attempts = 0;
-        while (attempts < num_threads) {
-            auto& queue = queues[queue_id % queues.size()];
+        while (attempts < actual_threads) {
+            auto& queue = queues[queue_id];
             
-            if (queue->size.load() < QUEUE_SIZE_LIMIT / num_threads) {
+            if (queue->size.load() < QUEUE_SIZE_LIMIT / actual_threads) {
                 std::lock_guard<std::mutex> lock(queue->mutex);
                 queue->tasks.emplace_back(std::forward<F>(f));
                 queue->size++;
@@ -438,7 +447,7 @@ public:
                 return;
             }
             
-            queue_id = (queue_id + 1) % num_threads;
+            queue_id = (queue_id + 1) % actual_threads;
             attempts++;
         }
         
