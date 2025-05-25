@@ -49,9 +49,18 @@ struct Entry {
     bool is_directory{false};
     std::vector<std::shared_ptr<Entry>> children;
     mutable std::mutex children_mutex;
+    fs::file_time_type last_modified;
     
     Entry(const fs::path& p = "") : path(p) {
         children.reserve(PREALLOCATE_ENTRIES);
+        try {
+            if (fs::exists(path)) {
+                last_modified = fs::last_write_time(path);
+            }
+        } catch (...) {
+            // Use epoch time if we can't get the modified time
+            last_modified = fs::file_time_type{};
+        }
     }
 };
 
@@ -169,6 +178,7 @@ private:
                     
                     if (item.is_directory()) {
                         child->is_directory = true;
+                        child->last_modified = item.last_write_time();
                         dir_count++;
                         
                         // Add child to parent before scanning (for UI updates)
@@ -183,6 +193,7 @@ private:
                         });
                     } else if (item.is_regular_file()) {
                         child->size = item.file_size();
+                        child->last_modified = item.last_write_time();
                         file_count++;
                         
                         // Add to parent
@@ -353,7 +364,9 @@ private:
         SIZE_DESC,
         SIZE_ASC,
         NAME_ASC,
-        NAME_DESC
+        NAME_DESC,
+        TIME_DESC,
+        TIME_ASC
     };
     SortMode sort_mode = SortMode::SIZE_DESC;
     
@@ -460,8 +473,8 @@ public:
                     sort_by_name();
                     break;
                     
-                case 'r':
-                    refresh_current_directory();
+                case 'm':
+                    sort_by_time();
                     break;
             }
         }
@@ -505,6 +518,18 @@ private:
                 std::sort(current_view.begin(), current_view.end(),
                     [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
                         return a->path.filename() > b->path.filename(); 
+                    });
+                break;
+            case SortMode::TIME_DESC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->last_modified > b->last_modified; 
+                    });
+                break;
+            case SortMode::TIME_ASC:
+                std::sort(current_view.begin(), current_view.end(),
+                    [](const std::shared_ptr<Entry>& a, const std::shared_ptr<Entry>& b) { 
+                        return a->last_modified < b->last_modified; 
                     });
                 break;
         }
@@ -620,6 +645,8 @@ private:
             case SortMode::SIZE_ASC: sort_str += "size ascending"; break;
             case SortMode::NAME_ASC: sort_str += "name ascending"; break;
             case SortMode::NAME_DESC: sort_str += "name descending"; break;
+            case SortMode::TIME_DESC: sort_str += "modified descending"; break;
+            case SortMode::TIME_ASC: sort_str += "modified ascending"; break;
         }
         mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
         
@@ -745,6 +772,16 @@ private:
             sort_mode = SortMode::NAME_DESC;
         } else {
             sort_mode = SortMode::NAME_ASC;
+        }
+        apply_sort();
+    }
+    
+    void sort_by_time() {
+        // Toggle between descending and ascending
+        if (sort_mode == SortMode::TIME_DESC) {
+            sort_mode = SortMode::TIME_ASC;
+        } else {
+            sort_mode = SortMode::TIME_DESC;
         }
         apply_sort();
     }
