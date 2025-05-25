@@ -127,6 +127,27 @@ public:
     }
 };
 
+// Helper function to shorten paths for display
+// Preserves first 20 and last 20 characters for long paths
+std::string shorten_path(const std::string& path, size_t max_length = 45) {
+    if (path.length() <= max_length) {
+        return path;
+    }
+    
+    // For paths longer than max_length, show first 20 and last 20 chars
+    const size_t prefix_len = 20;
+    const size_t suffix_len = 20;
+    const std::string ellipsis = "...";
+    
+    // Make sure we have enough characters
+    if (path.length() <= prefix_len + suffix_len + ellipsis.length()) {
+        return path;
+    }
+    
+    return path.substr(0, prefix_len) + ellipsis + 
+           path.substr(path.length() - suffix_len);
+}
+
 // Enhanced entry structure with more metadata
 struct Entry {
     fs::path path;
@@ -377,6 +398,8 @@ private:
     std::atomic<size_t> entries_traversed{0};
     std::chrono::steady_clock::time_point start_time;
     ProgressThrottle progress_throttle;
+    std::string current_path;
+    std::mutex current_path_mutex;
     
     // Hard link tracking
     struct InodeKey {
@@ -425,7 +448,17 @@ private:
     void update_progress() {
         if (config.show_progress && progress_throttle.should_update()) {
             size_t current_entries = entries_traversed.load();
-            std::cerr << "\rEnumerating " << current_entries << " items" << std::flush;
+            std::string path_display;
+            
+            {
+                std::lock_guard<std::mutex> lock(current_path_mutex);
+                path_display = current_path;
+            }
+            
+            // Format the progress message with shortened path
+            std::string shortened = shorten_path(path_display);
+            std::cerr << "\rEnumerating " << current_entries << " items - " 
+                      << shortened << std::flush;
         }
     }
     
@@ -439,6 +472,12 @@ private:
                 return;
             }
             
+            // Update current path for progress display
+            {
+                std::lock_guard<std::mutex> lock(current_path_mutex);
+                current_path = entry->path.string();
+            }
+            
             std::vector<fs::directory_entry> entries;
             entries.reserve(BATCH_SIZE);
             
@@ -450,6 +489,12 @@ private:
             for (const auto& item : entries) {
                 try {
                     auto child = std::make_shared<Entry>(item.path());
+                    
+                    // Update current path for progress display
+                    {
+                        std::lock_guard<std::mutex> lock(current_path_mutex);
+                        current_path = item.path().string();
+                    }
                     
                     // Check filesystem boundary
                     if (config.stay_on_filesystem && child->device_id != root_device) {
@@ -543,6 +588,12 @@ public:
         for (const auto& path : paths) {
             auto root = std::make_shared<Entry>(path);
             root->is_directory = fs::is_directory(path);
+            
+            // Set initial path for progress display
+            {
+                std::lock_guard<std::mutex> lock(current_path_mutex);
+                current_path = path.string();
+            }
             
             if (root->is_directory) {
                 dir_count++;
