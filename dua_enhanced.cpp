@@ -1,4 +1,4 @@
-// dua_enhanced_v7.cpp - Enhanced Disk Usage Analyzer with all features and deadlock prevention
+// dua_enhanced_optimized.cpp - Enhanced Disk Usage Analyzer with optimized UI performance
 // Complete reimplementation of dua-cli with additional features and robustness improvements
 
 #include <iostream>
@@ -781,6 +781,19 @@ public:
     }
 };
 
+// Cache for rendered lines to detect changes
+struct LineCache {
+    std::string content;
+    int attributes;
+    bool is_selected;
+    
+    bool operator!=(const LineCache& other) const {
+        return content != other.content || 
+               attributes != other.attributes || 
+               is_selected != other.is_selected;
+    }
+};
+
 // Interactive UI with enhanced features
 class InteractiveUI {
 private:
@@ -796,6 +809,28 @@ private:
     std::string glob_pattern;
     std::vector<std::shared_ptr<Entry>> navigation_stack;
     Config& config;
+    
+    // Performance optimization: cache rendered lines
+    std::vector<LineCache> line_cache;
+    bool needs_full_redraw = true;
+    size_t last_selected_index = SIZE_MAX;
+    size_t last_view_offset = SIZE_MAX;
+    std::string last_status_line;
+    std::string last_path_line;
+    
+    // Event batching for smooth movement
+    std::chrono::steady_clock::time_point last_input_time;
+    static constexpr auto INPUT_BATCH_DELAY = std::chrono::milliseconds(5);
+    
+    // Cached formatted strings
+    struct CachedEntry {
+        std::string formatted_size;
+        std::string formatted_time;
+        std::string formatted_name;
+        double percentage;
+        bool needs_update = true;
+    };
+    std::unordered_map<std::shared_ptr<Entry>, CachedEntry> format_cache;
     
     enum class SortMode {
         SIZE_DESC,
@@ -829,14 +864,26 @@ public:
         
         update_view();
         navigation_stack.push_back(current_dir);
+        
+        // Pre-allocate cache
+        line_cache.reserve(LINES);
     }
     
     void run() {
+        // Initialize ncurses with optimizations
         initscr();
         cbreak();
         noecho();
         keypad(stdscr, TRUE);
         curs_set(0);
+        
+        // Enable immediate key response
+        nodelay(stdscr, TRUE);  // Non-blocking getch()
+        
+        // Optimize screen updates
+        scrollok(stdscr, FALSE);  // Disable scrolling
+        idlok(stdscr, TRUE);      // Use hardware insert/delete line
+        idcok(stdscr, TRUE);      // Use hardware insert/delete char
         
         if (has_colors()) {
             start_color();
@@ -851,112 +898,63 @@ public:
         }
         
         bool running = true;
+        int pending_move = 0;  // Accumulate rapid movements
+        
         while (running) {
-            draw();
-            
-            if (glob_search_active) {
-                handle_glob_search();
+            // Draw only what's needed
+            if (needs_full_redraw) {
+                draw_full();
+                needs_full_redraw = false;
             } else {
-                int ch = getch();
+                draw_differential();
+            }
+            
+            // Handle input with batching for smooth movement
+            int ch = getch();
+            if (ch != ERR) {
+                auto now = std::chrono::steady_clock::now();
+                bool is_movement = (ch == KEY_UP || ch == KEY_DOWN || 
+                                   ch == 'j' || ch == 'k');
                 
-                switch (ch) {
-                    case KEY_UP:
-                    case 'k':
+                if (is_movement) {
+                    // Batch rapid movements
+                    if (now - last_input_time < INPUT_BATCH_DELAY) {
+                        pending_move += (ch == KEY_DOWN || ch == 'j') ? 1 : -1;
+                        napms(1);  // Brief pause to collect more input
+                        continue;
+                    }
+                    
+                    // Apply accumulated movement
+                    if (pending_move != 0) {
+                        apply_movement(pending_move);
+                        pending_move = 0;
+                    }
+                    
+                    // Apply current movement
+                    if (ch == KEY_UP || ch == 'k') {
                         navigate_up();
-                        break;
-                        
-                    case KEY_DOWN:
-                    case 'j':
+                    } else {
                         navigate_down();
-                        break;
-                        
-                    case KEY_RIGHT:
-                    case KEY_ENTER:
-                    case '\n':
-                    case 'l':
-                    case 'o':
-                        enter_directory();
-                        break;
-                        
-                    case KEY_LEFT:
-                    case 'h':
-                    case KEY_BACKSPACE:
-                    case 'u':
-                        exit_directory();
-                        break;
-                        
-                    case ' ':
-                        toggle_mark();
-                        break;
-                        
-                    case 'a':
-                    case 'A':
-                        toggle_all_marks();
-                        break;
-                        
-                    case 'd':
-                        if (has_marked_items()) {
-                            delete_marked_entries();
-                        } else if (selected_index < current_view.size()) {
-                            current_view[selected_index]->marked = true;
-                            navigate_down();
+                    }
+                    
+                    last_input_time = now;
+                } else {
+                    // Handle non-movement keys
+                    if (glob_search_active) {
+                        handle_glob_search(ch);
+                    } else {
+                        if (handle_key(ch) == false) {
+                            running = false;
                         }
-                        break;
-                        
-                    case 'O':  // Open with system
-                        open_selected();
-                        break;
-                        
-                    case '/':  // Glob search
-                        start_glob_search();
-                        break;
-                        
-                    case 'r':  // Refresh selected
-                        refresh_selected();
-                        break;
-                        
-                    case 'R':  // Refresh all
-                        refresh_all();
-                        break;
-                        
-                    case '?':
-                        show_help = !show_help;
-                        break;
-                        
-                    case 'q':
-                    case 'Q':
-                        running = false;
-                        break;
-                        
-                    case 's':
-                        sort_by_size();
-                        break;
-                        
-                    case 'n':
-                        sort_by_name();
-                        break;
-                        
-                    case 'm':
-                        sort_by_time();
-                        break;
-                        
-                    case 'c':
-                        sort_by_count();
-                        break;
-                        
-                    case 'M':
-                        show_mtime = !show_mtime;
-                        break;
-                        
-                    case 'C':
-                        show_count = !show_count;
-                        break;
-                        
-                    case 'g':
-                    case 'S':
-                        // Cycle visualization mode (would need to implement)
-                        break;
+                    }
                 }
+            } else {
+                // No input - apply any pending movement
+                if (pending_move != 0) {
+                    apply_movement(pending_move);
+                    pending_move = 0;
+                }
+                napms(10);  // Small delay when idle
             }
         }
         
@@ -967,6 +965,31 @@ public:
     }
     
 private:
+    // Apply accumulated movement efficiently
+    void apply_movement(int delta) {
+        if (delta == 0) return;
+        
+        size_t new_index = selected_index;
+        if (delta > 0) {
+            new_index = std::min(selected_index + delta, current_view.size() - 1);
+        } else {
+            size_t abs_delta = static_cast<size_t>(-delta);
+            new_index = (abs_delta > selected_index) ? 0 : selected_index - abs_delta;
+        }
+        
+        if (new_index != selected_index) {
+            selected_index = new_index;
+            
+            // Adjust view offset if needed
+            int max_visible = LINES - 4;
+            if (static_cast<int>(selected_index) < static_cast<int>(view_offset)) {
+                view_offset = selected_index;
+            } else if (static_cast<int>(selected_index) >= static_cast<int>(view_offset) + max_visible) {
+                view_offset = selected_index - max_visible + 1;
+            }
+        }
+    }
+    
     void navigate_up() {
         if (selected_index > 0) {
             selected_index--;
@@ -995,6 +1018,7 @@ private:
                 update_view();
                 selected_index = 0;
                 view_offset = 0;
+                needs_full_redraw = true;
             }
         }
     }
@@ -1006,6 +1030,7 @@ private:
             update_view();
             selected_index = 0;
             view_offset = 0;
+            needs_full_redraw = true;
         }
     }
     
@@ -1032,17 +1057,20 @@ private:
         glob_pattern.clear();
     }
     
-    void handle_glob_search() {
+    void handle_glob_search(int ch) {
         // Show search prompt
+        move(LINES - 1, 0);
+        clrtoeol();
         mvprintw(LINES - 1, 0, "Search: %s", glob_pattern.c_str());
         refresh();
         
-        int ch = getch();
         if (ch == 27) {  // ESC
             glob_search_active = false;
+            needs_full_redraw = true;
         } else if (ch == '\n') {
             perform_glob_search();
             glob_search_active = false;
+            needs_full_redraw = true;
         } else if (ch == KEY_BACKSPACE || ch == 127) {
             if (!glob_pattern.empty()) {
                 glob_pattern.pop_back();
@@ -1162,6 +1190,7 @@ private:
     }
     
     void update_view() {
+        format_cache.clear();
         current_view.clear();
         {
             std::lock_guard<std::mutex> lock(current_dir->children_mutex);
@@ -1223,13 +1252,266 @@ private:
         }
     }
     
-    void draw() {
+    // Differential rendering - only update changed lines
+    void draw_differential() {
+        bool selection_changed = (selected_index != last_selected_index);
+        bool view_scrolled = (view_offset != last_view_offset);
+        
+        if (!selection_changed && !view_scrolled) {
+            return;  // Nothing to update
+        }
+        
+        int y = 2;
+        int max_y = LINES - 2;
+        
+        // If view scrolled, we need to redraw all visible lines
+        if (view_scrolled) {
+            for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
+                draw_entry_line(i, y, true);
+                y++;
+            }
+            
+            // Clear any remaining lines
+            while (y < max_y) {
+                move(y, 0);
+                clrtoeol();
+                y++;
+            }
+        } else if (selection_changed) {
+            // Only update the old and new selected lines
+            if (last_selected_index != SIZE_MAX && 
+                last_selected_index >= view_offset && 
+                last_selected_index < view_offset + (max_y - 2)) {
+                int old_y = 2 + (last_selected_index - view_offset);
+                draw_entry_line(last_selected_index, old_y, false);
+            }
+            
+            if (selected_index >= view_offset && 
+                selected_index < view_offset + (max_y - 2)) {
+                int new_y = 2 + (selected_index - view_offset);
+                draw_entry_line(selected_index, new_y, false);
+            }
+        }
+        
+        // Update status line if needed
+        update_status_line();
+        
+        // Remember current state
+        last_selected_index = selected_index;
+        last_view_offset = view_offset;
+        
+        refresh();
+    }
+    
+    // Draw a single entry line with full-line highlighting
+    void draw_entry_line(size_t index, int y, bool force_redraw) {
+        if (index >= current_view.size()) return;
+        
+        auto entry = current_view[index];
+        bool is_selected = (index == selected_index);
+        
+        // Get cached formatting or create new
+        auto& cached = format_cache[entry];
+        if (cached.needs_update) {
+            update_format_cache(entry, cached);
+        }
+        
+        // Check if we need to redraw this line
+        if (!force_redraw && index < line_cache.size() && 
+            line_cache[index].is_selected == is_selected) {
+            return;  // Line hasn't changed
+        }
+        
+        // Move to line position
+        move(y, 0);
+        
+        // Clear the entire line first
+        clrtoeol();
+        
+        // Apply selection highlighting to the entire line
+        if (is_selected) {
+            attron(COLOR_PAIR(4));
+            // Fill the entire line with spaces to create full-line highlight
+            for (int i = 0; i < COLS; i++) {
+                mvaddch(y, i, ' ');
+            }
+        }
+        
+        // Draw the line content
+        int col_x = 0;
+        
+        // Mark indicator
+        if (entry->marked.load()) {
+            if (!is_selected) attron(COLOR_PAIR(8) | A_BOLD);
+            mvaddch(y, col_x, '*');
+            if (!is_selected) attroff(COLOR_PAIR(8) | A_BOLD);
+        } else {
+            mvaddch(y, col_x, ' ');
+        }
+        col_x = 1;
+        
+        // Size
+        if (is_selected) {
+            attron(COLOR_PAIR(4));  // Keep selection color
+        } else {
+            attron(COLOR_PAIR(3));
+        }
+        mvprintw(y, col_x, "%9s", cached.formatted_size.c_str());
+        if (!is_selected) {
+            attroff(COLOR_PAIR(3));
+        }
+        col_x += 10;
+        
+        // Separator
+        mvprintw(y, col_x, " | ");
+        col_x += 3;
+        
+        // Percentage
+        mvprintw(y, col_x, "%5.1f%%", cached.percentage);
+        col_x += 8;
+        
+        // Separator and graph bar
+        mvprintw(y, col_x, " | ");
+        col_x += 3;
+        
+        // Graph bar
+        int bar_width = static_cast<int>(cached.percentage / 100.0 * 20);
+        bar_width = std::min(bar_width, 20);
+        if (is_selected) {
+            // Use a different character for selected bars
+            for (int j = 0; j < bar_width; j++) {
+                mvaddch(y, col_x + j, '=');
+            }
+        } else {
+            attron(COLOR_PAIR(3));
+            for (int j = 0; j < bar_width; j++) {
+                mvaddch(y, col_x + j, ACS_CKBOARD);
+            }
+            attroff(COLOR_PAIR(3));
+        }
+        col_x += 20;
+        
+        // Optional columns
+        if (show_mtime) {
+            mvprintw(y, col_x, " | ");
+            col_x += 3;
+            mvprintw(y, col_x, "%19s", cached.formatted_time.c_str());
+            col_x += 20;
+        }
+        
+        if (show_count) {
+            mvprintw(y, col_x, " | ");
+            col_x += 3;
+            
+            if (entry->entry_count > 0) {
+                mvprintw(y, col_x, "%7lu", entry->entry_count.load());
+            } else {
+                mvprintw(y, col_x, "      -");
+            }
+            col_x += 8;
+        }
+        
+        // Name separator
+        mvprintw(y, col_x, " | ");
+        col_x += 3;
+        
+        // Name
+        if (entry->is_directory && !is_selected) {
+            attron(COLOR_PAIR(1) | A_BOLD);
+        }
+        mvprintw(y, col_x, "%s", cached.formatted_name.c_str());
+        if (entry->is_directory && !is_selected) {
+            attroff(COLOR_PAIR(1) | A_BOLD);
+        }
+        
+        // Turn off selection highlighting
+        if (is_selected) {
+            attroff(COLOR_PAIR(4));
+        }
+        
+        // Update cache
+        if (index >= line_cache.size()) {
+            line_cache.resize(index + 1);
+        }
+        line_cache[index].is_selected = is_selected;
+    }
+    
+    void update_format_cache(std::shared_ptr<Entry> entry, CachedEntry& cached) {
+        cached.formatted_size = format_size(entry->size, config.format);
+        cached.percentage = (current_dir->size > 0) ? 
+            (static_cast<double>(entry->size.load()) / current_dir->size.load() * 100.0) : 0.0;
+        
+        if (show_mtime) {
+            auto time_since_epoch = entry->last_modified.time_since_epoch();
+            auto seconds = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch).count();
+            time_t time_t_val = static_cast<time_t>(seconds);
+            
+            char time_buf[32];
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", 
+                    localtime(&time_t_val));
+            cached.formatted_time = time_buf;
+        }
+        
+        std::string name = entry->path.filename().string();
+        if (name.empty()) name = entry->path.string();
+        
+        if (entry->is_directory) {
+            cached.formatted_name = "/" + name;
+        } else {
+            cached.formatted_name = " " + name;
+        }
+        
+        int available_width = COLS - 45;
+        if (show_mtime) available_width -= 23;
+        if (show_count) available_width -= 11;
+        
+        if (cached.formatted_name.length() > static_cast<size_t>(available_width) && available_width > 3) {
+            cached.formatted_name = "..." + 
+                cached.formatted_name.substr(cached.formatted_name.length() - available_width + 3);
+        }
+        
+        cached.needs_update = false;
+    }
+    
+    void update_status_line() {
+        // Build current status
+        std::string sort_str = "Sort mode: ";
+        switch (sort_mode) {
+            case SortMode::SIZE_DESC: sort_str += "size descending"; break;
+            case SortMode::SIZE_ASC: sort_str += "size ascending"; break;
+            case SortMode::NAME_ASC: sort_str += "name ascending"; break;
+            case SortMode::NAME_DESC: sort_str += "name descending"; break;
+            case SortMode::TIME_DESC: sort_str += "modified descending"; break;
+            case SortMode::TIME_ASC: sort_str += "modified ascending"; break;
+            case SortMode::COUNT_DESC: sort_str += "count descending"; break;
+            case SortMode::COUNT_ASC: sort_str += "count ascending"; break;
+        }
+        
+        size_t marked_count = count_marked_items();
+        if (marked_count > 0) {
+            uintmax_t marked_size = calculate_marked_size();
+            sort_str += " | Marked: " + std::to_string(marked_count) + 
+                       " items (" + format_size(marked_size, config.format) + ")";
+        }
+        
+        // Only update if changed
+        if (sort_str != last_status_line) {
+            attron(A_REVERSE);
+            move(LINES - 2, 0);
+            clrtoeol();
+            mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
+            attroff(A_REVERSE);
+            last_status_line = sort_str;
+        }
+    }
+    
+    void draw_full() {
         clear();
         
         // Header
         attron(A_REVERSE);
         mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 1, " Disk Usage Analyzer v1.0.2 [C++]    (press ? for help)");
+        mvprintw(0, 1, " Disk Usage Analyzer v1.0.2 [C++ Optimized]    (press ? for help)");
         attroff(A_REVERSE);
         
         // Path bar
@@ -1252,155 +1534,29 @@ private:
         int y = 2;
         int max_y = LINES - 2;
         
-        // Calculate column positions
-        int col_x = 0;
-        int size_col_width = 10;
-        int percent_col_width = 8;
-        int graph_col_width = 20;
-        int mtime_col_width = show_mtime ? 20 : 0;
-        int count_col_width = show_count ? 8 : 0;
-        
+        line_cache.clear();
         for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
-            auto entry = current_view[i];
-            
-            // Highlight selected
-            if (i == selected_index) {
-                attron(COLOR_PAIR(4));
-                mvhline(y, 0, ' ', COLS);
-            }
-            
-            col_x = 1;
-            
-            // Mark indicator
-            if (entry->marked.load()) {
-                attron(COLOR_PAIR(8) | A_BOLD);
-                mvprintw(y, 0, "*");
-                attroff(COLOR_PAIR(8) | A_BOLD);
-            }
-            
-            // Size
-            attron(COLOR_PAIR(3));
-            mvprintw(y, col_x, "%9s", format_size(entry->size, config.format).c_str());
-            attroff(COLOR_PAIR(3));
-            col_x += size_col_width;
-            
-            mvprintw(y, col_x, " | ");
-            col_x += 3;
-            
-            // Percentage
-            double percentage = (current_dir->size > 0) ? 
-                (static_cast<double>(entry->size.load()) / current_dir->size.load() * 100.0) : 0.0;
-            mvprintw(y, col_x, "%5.1f%%", percentage);
-            col_x += percent_col_width;
-            
-            mvprintw(y, col_x, " | ");
-            col_x += 3;
-            
-            // Graph bar
-            int bar_width = static_cast<int>(percentage / 100.0 * graph_col_width);
-            bar_width = std::min(bar_width, graph_col_width);
-            attron(COLOR_PAIR(3));
-            for (int j = 0; j < bar_width; j++) {
-                mvaddch(y, col_x + j, ACS_CKBOARD);
-            }
-            attroff(COLOR_PAIR(3));
-            col_x += graph_col_width;
-            
-            // Modified time
-            if (show_mtime) {
-                mvprintw(y, col_x, " | ");
-                col_x += 3;
-                
-                // C++17 compatible time conversion
-                auto time_since_epoch = entry->last_modified.time_since_epoch();
-                auto seconds = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch).count();
-                time_t time_t_val = static_cast<time_t>(seconds);
-                
-                char time_buf[32];
-                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", 
-                        localtime(&time_t_val));
-                mvprintw(y, col_x, "%19s", time_buf);
-                col_x += mtime_col_width;
-            }
-            
-            // Entry count
-            if (show_count) {
-                mvprintw(y, col_x, " | ");
-                col_x += 3;
-                
-                if (entry->entry_count > 0) {
-                    mvprintw(y, col_x, "%7lu", entry->entry_count.load());
-                } else {
-                    mvprintw(y, col_x, "      -");
-                }
-                col_x += count_col_width;
-            }
-            
-            mvprintw(y, col_x, " | ");
-            col_x += 3;
-            
-            // Name
-            if (entry->is_directory) {
-                attron(COLOR_PAIR(1) | A_BOLD);
-                mvprintw(y, col_x, "/");
-            } else {
-                mvprintw(y, col_x, " ");
-            }
-            
-            std::string name = entry->path.filename().string();
-            if (name.empty()) name = entry->path.string();
-            int max_name_width = COLS - col_x - 2;
-            if (name.length() > static_cast<size_t>(max_name_width)) {
-                name = "..." + name.substr(name.length() - max_name_width + 3);
-            }
-            mvprintw(y, col_x + 1, "%s", name.c_str());
-            
-            if (entry->is_directory) {
-                attroff(COLOR_PAIR(1) | A_BOLD);
-            }
-            
-            if (i == selected_index) {
-                attroff(COLOR_PAIR(4));
-            }
-            
+            draw_entry_line(i, y, true);
             y++;
         }
         
         // Status bar
-        attron(A_REVERSE);
-        mvhline(LINES - 2, 0, ' ', COLS);
+        update_status_line();
         
-        // Sort mode
-        std::string sort_str = "Sort mode: ";
-        switch (sort_mode) {
-            case SortMode::SIZE_DESC: sort_str += "size descending"; break;
-            case SortMode::SIZE_ASC: sort_str += "size ascending"; break;
-            case SortMode::NAME_ASC: sort_str += "name ascending"; break;
-            case SortMode::NAME_DESC: sort_str += "name descending"; break;
-            case SortMode::TIME_DESC: sort_str += "modified descending"; break;
-            case SortMode::TIME_ASC: sort_str += "modified ascending"; break;
-            case SortMode::COUNT_DESC: sort_str += "count descending"; break;
-            case SortMode::COUNT_ASC: sort_str += "count ascending"; break;
+        // Help line
+        if (!glob_search_active && !show_help) {
+            move(LINES - 1, 0);
+            clrtoeol();
+            mvprintw(LINES - 1, 1, " mark = d/space | delete = d | search = / | refresh = r/R");
         }
-        mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
-        
-        // Marked items info
-        size_t marked_count = count_marked_items();
-        if (marked_count > 0) {
-            uintmax_t marked_size = calculate_marked_size();
-            std::string marked_str = " | Marked: " + std::to_string(marked_count) + 
-                                   " items (" + format_size(marked_size, config.format) + ")";
-            mvprintw(LINES - 2, 25, "%s", marked_str.c_str());
-        }
-        
-        attroff(A_REVERSE);
         
         if (show_help) {
             draw_help();
-        } else if (!glob_search_active) {
-            // Help hints
-            mvprintw(LINES - 1, 1, " mark = d/space | delete = d | search = / | refresh = r/R");
         }
+        
+        // Remember current state
+        last_selected_index = selected_index;
+        last_view_offset = view_offset;
         
         refresh();
     }
@@ -1448,6 +1604,116 @@ private:
         mvprintw(help_y + 17, help_x + 20, "Press any key to close help");
         
         attroff(COLOR_PAIR(7));
+    }
+    
+    // Handle non-movement keys
+    bool handle_key(int ch) {
+        switch (ch) {
+            case KEY_RIGHT:
+            case KEY_ENTER:
+            case '\n':
+            case 'l':
+            case 'o':
+                enter_directory();
+                break;
+                
+            case KEY_LEFT:
+            case 'h':
+            case KEY_BACKSPACE:
+            case 'u':
+                exit_directory();
+                break;
+                
+            case ' ':
+                toggle_mark();
+                break;
+                
+            case 'a':
+            case 'A':
+                toggle_all_marks();
+                needs_full_redraw = true;
+                break;
+                
+            case 'd':
+                if (has_marked_items()) {
+                    delete_marked_entries();
+                    needs_full_redraw = true;
+                } else if (selected_index < current_view.size()) {
+                    current_view[selected_index]->marked = true;
+                    navigate_down();
+                }
+                break;
+                
+            case 'O':  // Open with system
+                open_selected();
+                break;
+                
+            case '/':  // Glob search
+                start_glob_search();
+                needs_full_redraw = true;
+                break;
+                
+            case 'r':  // Refresh selected
+                refresh_selected();
+                needs_full_redraw = true;
+                break;
+                
+            case 'R':  // Refresh all
+                refresh_all();
+                needs_full_redraw = true;
+                break;
+                
+            case '?':
+                show_help = !show_help;
+                needs_full_redraw = true;
+                break;
+                
+            case 'q':
+            case 'Q':
+                return false;  // Exit
+                
+            case 's':
+                sort_by_size();
+                needs_full_redraw = true;
+                break;
+                
+            case 'n':
+                sort_by_name();
+                needs_full_redraw = true;
+                break;
+                
+            case 'm':
+                sort_by_time();
+                needs_full_redraw = true;
+                break;
+                
+            case 'c':
+                sort_by_count();
+                needs_full_redraw = true;
+                break;
+                
+            case 'M':
+                show_mtime = !show_mtime;
+                format_cache.clear();
+                needs_full_redraw = true;
+                break;
+                
+            case 'C':
+                show_count = !show_count;
+                format_cache.clear();
+                needs_full_redraw = true;
+                break;
+                
+            case 'g':
+            case 'S':
+                // Cycle visualization mode (would need to implement)
+                break;
+                
+            default:
+                break;
+        }
+        
+        return true;  // Continue running
     }
     
     void sort_by_size() {
