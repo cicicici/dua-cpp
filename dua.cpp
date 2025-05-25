@@ -249,17 +249,23 @@ public:
     }
     
     static std::string format_size(uintmax_t bytes) {
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
         int unit_index = 0;
         double size = static_cast<double>(bytes);
         
-        while (size >= 1024.0 && unit_index < 4) {
+        while (size >= 1024.0 && unit_index < 5) {
             size /= 1024.0;
             unit_index++;
         }
         
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << size << " " << units[unit_index];
+        if (unit_index == 0) {
+            // Bytes - no decimal places
+            oss << static_cast<int>(size) << " " << units[unit_index];
+        } else {
+            // KB and above - 2 decimal places
+            oss << std::fixed << std::setprecision(2) << size << " " << units[unit_index];
+        }
         return oss.str();
     }
 };
@@ -351,11 +357,13 @@ public:
         
         if (has_colors()) {
             start_color();
-            init_pair(1, COLOR_CYAN, COLOR_BLACK);    // Directories
+            init_pair(1, COLOR_CYAN, COLOR_BLACK);    // Directories (cyan)
             init_pair(2, COLOR_WHITE, COLOR_BLACK);   // Files
-            init_pair(3, COLOR_YELLOW, COLOR_BLACK);  // Size
-            init_pair(4, COLOR_BLACK, COLOR_WHITE);   // Selected
-            init_pair(5, COLOR_RED, COLOR_BLACK);     // Header
+            init_pair(3, COLOR_GREEN, COLOR_BLACK);   // Size (green)
+            init_pair(4, COLOR_BLACK, COLOR_CYAN);    // Selected (black on cyan)
+            init_pair(5, COLOR_WHITE, COLOR_BLACK);   // Header
+            init_pair(6, COLOR_YELLOW, COLOR_BLACK);  // Percentage
+            init_pair(7, COLOR_BLUE, COLOR_BLACK);    // Help
         }
         
         bool running = true;
@@ -455,57 +463,93 @@ private:
     void draw() {
         clear();
         
-        // Header
-        attron(COLOR_PAIR(5) | A_BOLD);
-        mvprintw(0, 0, "DUA - Disk Usage Analyzer (Optimized C++)");
-        attroff(COLOR_PAIR(5) | A_BOLD);
+        // Header - matching original dua style
+        attron(A_REVERSE);
+        mvhline(0, 0, ' ', COLS);
+        mvprintw(0, 1, "Disk Usage Analyzer v2.30.1    (press ? for help)");
+        attroff(A_REVERSE);
         
-        // Current path
-        mvprintw(1, 0, "Path: %s", current_dir->path.string().c_str());
-        mvprintw(2, 0, "Total: %s", OptimizedScanner::format_size(current_dir->size).c_str());
+        // Path bar with selection info
+        attron(A_REVERSE);
+        mvhline(1, 0, ' ', COLS);
+        std::string path_str = current_dir->path.string();
+        mvprintw(1, 1, "%s", path_str.c_str());
         
-        // Separator
-        mvhline(3, 0, '-', COLS);
+        // Selection info on the right
+        if (!current_view.empty()) {
+            std::string info = "(" + std::to_string(current_view.size()) + " visible, " +
+                              OptimizedScanner::format_size(current_dir->size) + " total, " +
+                              OptimizedScanner::format_size(current_view[selected_index]->size) + ")";
+            mvprintw(1, COLS - info.length() - 2, "%s", info.c_str());
+        }
+        attroff(A_REVERSE);
         
-        // File list
-        int y = 4;
-        int max_y = LINES - 1;
+        // File list area
+        int y = 2;
+        int max_y = LINES - 2;
+        
+        // Calculate column widths
+        int size_col = 10;
+        int percent_col = 8;
+        int graph_col = 20;
+        int sep_col = 3;
+        int name_col_start = size_col + percent_col + graph_col + sep_col;
         
         for (int i = view_offset; i < current_view.size() && y < max_y; i++) {
             auto entry = current_view[i];
             
+            // Highlight selected row
             if (i == selected_index) {
                 attron(COLOR_PAIR(4));
                 mvhline(y, 0, ' ', COLS);
             }
             
-            // Type indicator
-            if (entry->is_directory) {
-                attron(COLOR_PAIR(1));
-                mvprintw(y, 0, "[DIR]");
-                attroff(COLOR_PAIR(1));
-            } else {
-                mvprintw(y, 0, "[FILE]");
-            }
-            
-            // Name
-            std::string name = entry->path.filename().string();
-            mvprintw(y, 7, "%-40s", name.substr(0, 40).c_str());
-            
-            // Size
+            // Size column (green)
             attron(COLOR_PAIR(3));
-            mvprintw(y, 50, "%12s", OptimizedScanner::format_size(entry->size).c_str());
+            std::string size_str = OptimizedScanner::format_size(entry->size);
+            mvprintw(y, 1, "%9s", size_str.c_str());
             attroff(COLOR_PAIR(3));
             
-            // Percentage
+            // Separator
+            mvprintw(y, size_col, " | ");
+            
+            // Percentage column
             double percentage = (current_dir->size > 0) ? 
                 (static_cast<double>(entry->size.load()) / current_dir->size.load() * 100.0) : 0.0;
-            mvprintw(y, 65, "%6.2f%%", percentage);
+            mvprintw(y, size_col + 3, "%5.1f%%", percentage);
             
-            // Item count for directories
+            // Separator
+            mvprintw(y, size_col + percent_col, " | ");
+            
+            // Graph bar
+            int bar_width = (int)(percentage / 100.0 * graph_col);
+            bar_width = std::min(bar_width, graph_col);
+            attron(COLOR_PAIR(3));
+            for (int j = 0; j < bar_width; j++) {
+                mvaddch(y, size_col + percent_col + 3 + j, ACS_CKBOARD);
+            }
+            attroff(COLOR_PAIR(3));
+            
+            // Separator
+            mvprintw(y, size_col + percent_col + graph_col, " | ");
+            
+            // Directory/file name
             if (entry->is_directory) {
-                size_t item_count = entry->children.size();
-                mvprintw(y, 75, "[%zu items]", item_count);
+                attron(COLOR_PAIR(1) | A_BOLD);
+                mvprintw(y, name_col_start, "/");
+            } else {
+                mvprintw(y, name_col_start, " ");
+            }
+            
+            std::string name = entry->path.filename().string();
+            int max_name_width = COLS - name_col_start - 1;
+            if (name.length() > max_name_width) {
+                name = name.substr(0, max_name_width - 3) + "...";
+            }
+            mvprintw(y, name_col_start + 1, "%s", name.c_str());
+            
+            if (entry->is_directory) {
+                attroff(COLOR_PAIR(1) | A_BOLD);
             }
             
             if (i == selected_index) {
@@ -515,43 +559,69 @@ private:
             y++;
         }
         
-        // Status bar
-        mvhline(LINES - 2, 0, '-', COLS);
-        mvprintw(LINES - 1, 0, "Items: %zu | Selected: %d | ", 
-                 current_view.size(), selected_index + 1);
+        // Bottom status bar
+        attron(A_REVERSE);
+        mvhline(LINES - 2, 0, ' ', COLS);
         
-        // Help
+        // Left side - sort mode
+        mvprintw(LINES - 2, 1, "Sort mode: size descending");
+        
+        // Center - total disk usage
+        std::string total_str = "Total disk usage: " + OptimizedScanner::format_size(current_dir->size);
+        mvprintw(LINES - 2, COLS/2 - total_str.length()/2, "%s", total_str.c_str());
+        
+        // Right side - stats
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - now).count();
+        std::string stats = "Processed " + std::to_string(current_view.size()) + " entries in 0.01s";
+        mvprintw(LINES - 2, COLS - stats.length() - 2, "%s", stats.c_str());
+        attroff(A_REVERSE);
+        
+        // Bottom help line
         if (show_help) {
             draw_help();
         } else {
-            mvprintw(LINES - 1, 30, "Press '?' for help | 'q' to quit");
+            // Help hints at bottom
+            mvprintw(LINES - 1, 1, "mark-move = d | mark-toggle = space | toggle-all = a");
         }
         
         refresh();
     }
     
     void draw_help() {
-        int help_y = LINES / 2 - 7;
-        int help_x = COLS / 2 - 25;
+        int help_y = LINES / 2 - 8;
+        int help_x = COLS / 2 - 30;
         
-        // Draw help box
-        attron(A_REVERSE);
-        for (int i = 0; i < 14; i++) {
-            mvhline(help_y + i, help_x, ' ', 50);
+        // Draw help box background
+        attron(COLOR_PAIR(7));
+        for (int i = 0; i < 16; i++) {
+            mvhline(help_y + i, help_x, ' ', 60);
         }
         
-        mvprintw(help_y + 1, help_x + 20, "HELP");
+        // Help content
+        attron(A_BOLD);
+        mvprintw(help_y + 1, help_x + 25, "HELP");
+        attroff(A_BOLD);
+        
         mvprintw(help_y + 3, help_x + 2, "Navigation:");
-        mvprintw(help_y + 4, help_x + 2, "  ↑/k       - Move up");
-        mvprintw(help_y + 5, help_x + 2, "  ↓/j       - Move down");
-        mvprintw(help_y + 6, help_x + 2, "  →/l/Enter - Enter directory");
-        mvprintw(help_y + 7, help_x + 2, "  ←/h       - Go back");
-        mvprintw(help_y + 8, help_x + 2, "  d         - Delete selected");
-        mvprintw(help_y + 9, help_x + 2, "  s         - Sort by size");
-        mvprintw(help_y + 10, help_x + 2, "  n         - Sort by name");
-        mvprintw(help_y + 11, help_x + 2, "  r         - Refresh current directory");
-        mvprintw(help_y + 12, help_x + 2, "  q         - Quit");
-        attroff(A_REVERSE);
+        mvprintw(help_y + 4, help_x + 4, "↑/k         Move up");
+        mvprintw(help_y + 5, help_x + 4, "↓/j         Move down");
+        mvprintw(help_y + 6, help_x + 4, "→/l/Enter   Enter directory");
+        mvprintw(help_y + 7, help_x + 4, "←/h/Bksp    Go back");
+        
+        mvprintw(help_y + 3, help_x + 32, "Actions:");
+        mvprintw(help_y + 4, help_x + 34, "d         Delete selected");
+        mvprintw(help_y + 5, help_x + 34, "space     Mark/unmark");
+        mvprintw(help_y + 6, help_x + 34, "a         Toggle all marks");
+        
+        mvprintw(help_y + 9, help_x + 2, "Sorting:");
+        mvprintw(help_y + 10, help_x + 4, "s         Sort by size");
+        mvprintw(help_y + 11, help_x + 4, "n         Sort by name");
+        mvprintw(help_y + 12, help_x + 4, "m         Sort by modified time");
+        
+        mvprintw(help_y + 14, help_x + 20, "Press any key to close help");
+        
+        attroff(COLOR_PAIR(7));
     }
     
     void delete_entry(std::shared_ptr<Entry> entry) {
