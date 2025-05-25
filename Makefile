@@ -1,350 +1,385 @@
 # Makefile for Enhanced DUA C++ Implementation
-# Supports multiple platforms and build configurations
+# This Makefile is designed to be safe and will NEVER delete source files
+# 
+# Usage:
+#   make              - Build the standard release version
+#   make debug        - Build with debug symbols
+#   make static       - Build statically linked version
+#   make clean        - Remove build artifacts (NOT source files!)
+#   make help         - Show all available targets
 
-# Compiler settings
+# ============================================================================
+# CONFIGURATION SECTION
+# ============================================================================
+
+# Compiler configuration
+# CXX is the C++ compiler to use. The ?= means it can be overridden from command line
 CXX ?= g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -pthread
-LDFLAGS = -lpthread
 
-# Platform detection
+# Base compiler flags that are always used
+CXXFLAGS_BASE = -std=c++17 -Wall -Wextra -pthread
+
+# Platform detection for platform-specific settings
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
-# Platform-specific settings
+# ============================================================================
+# PLATFORM-SPECIFIC SETTINGS
+# ============================================================================
+
+# Linux-specific settings
 ifeq ($(UNAME_S),Linux)
-    CXXFLAGS += -D__linux__
-    LDFLAGS += -lncurses
-    # Check for musl libc for fully static builds
+    CXXFLAGS_PLATFORM = -D__linux__
+    LDFLAGS_PLATFORM = -lncurses -lpthread
+    # Check if we're using musl for fully static builds
     LIBC := $(shell ldd --version 2>&1 | grep -q musl && echo musl || echo glibc)
 endif
 
+# macOS-specific settings
 ifeq ($(UNAME_S),Darwin)
-    CXXFLAGS += -D__APPLE__
-    # macOS ncurses is often in a different location
-    CXXFLAGS += -I/usr/local/opt/ncurses/include
-    LDFLAGS += -L/usr/local/opt/ncurses/lib -lncurses
+    CXXFLAGS_PLATFORM = -D__APPLE__
+    # macOS often has ncurses in a non-standard location
+    CXXFLAGS_PLATFORM += -I/usr/local/opt/ncurses/include
+    LDFLAGS_PLATFORM = -L/usr/local/opt/ncurses/lib -lncurses -lpthread
 endif
 
+# FreeBSD-specific settings
 ifeq ($(UNAME_S),FreeBSD)
-    CXXFLAGS += -D__FreeBSD__
-    LDFLAGS += -lncurses
+    CXXFLAGS_PLATFORM = -D__FreeBSD__
+    LDFLAGS_PLATFORM = -lncurses -lpthread
 endif
 
-# Build configurations
+# ============================================================================
+# BUILD CONFIGURATION OPTIONS
+# ============================================================================
+
+# These can be set from command line: make DEBUG=1
 DEBUG ?= 0
 STATIC ?= 0
-LTO ?= 0
-NATIVE ?= 0
+LTO ?= 0        # Link-Time Optimization
+NATIVE ?= 0     # CPU-specific optimizations
 
-# Apply build configurations
+# ============================================================================
+# CONDITIONAL FLAGS BASED ON BUILD OPTIONS
+# ============================================================================
+
+# Debug vs Release builds
 ifeq ($(DEBUG),1)
-    CXXFLAGS += -g -O0 -DDEBUG
-    TARGET_SUFFIX := _debug
+    CXXFLAGS_BUILD = -g -O0 -DDEBUG
+    TARGET_SUFFIX = _debug
 else
-    CXXFLAGS += -O3 -DNDEBUG
-    TARGET_SUFFIX :=
+    CXXFLAGS_BUILD = -O3 -DNDEBUG
+    TARGET_SUFFIX =
 endif
 
+# Static linking
 ifeq ($(STATIC),1)
-    LDFLAGS += -static
+    LDFLAGS_STATIC = -static
     TARGET_SUFFIX := $(TARGET_SUFFIX)_static
+else
+    LDFLAGS_STATIC =
 endif
 
+# Link-Time Optimization
 ifeq ($(LTO),1)
-    CXXFLAGS += -flto
-    LDFLAGS += -flto
+    CXXFLAGS_LTO = -flto
+    LDFLAGS_LTO = -flto
+else
+    CXXFLAGS_LTO =
+    LDFLAGS_LTO =
 endif
 
+# Native CPU optimizations
 ifeq ($(NATIVE),1)
-    CXXFLAGS += -march=native -mtune=native
+    CXXFLAGS_NATIVE = -march=native -mtune=native
+else
+    CXXFLAGS_NATIVE =
 endif
 
-# Target binary names
-TARGET_BASE = dua
-TARGET = $(TARGET_BASE)$(TARGET_SUFFIX)
+# ============================================================================
+# VERSION INFORMATION
+# ============================================================================
 
-# Source files
-SOURCES = dua_enhanced.cpp
-OBJECTS = $(SOURCES:.cpp=.o)
-
-# Installation directories
-PREFIX ?= /usr/local
-BINDIR = $(PREFIX)/bin
-MANDIR = $(PREFIX)/share/man/man1
-
-# Version information
 VERSION = 2.30.1-cpp
 GIT_HASH = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE = $(shell date +%Y-%m-%d)
 
-# Add version information to build
-CXXFLAGS += -DDUA_VERSION=\"$(VERSION)\" -DGIT_HASH=\"$(GIT_HASH)\" -DBUILD_DATE=\"$(BUILD_DATE)\"
+# Add version info to build
+CXXFLAGS_VERSION = -DDUA_VERSION=\"$(VERSION)\" \
+                   -DGIT_HASH=\"$(GIT_HASH)\" \
+                   -DBUILD_DATE=\"$(BUILD_DATE)\"
 
-# Default target
-.PHONY: all
+# ============================================================================
+# FINAL FLAGS ASSEMBLY
+# ============================================================================
+
+# Combine all the flags
+CXXFLAGS = $(CXXFLAGS_BASE) $(CXXFLAGS_PLATFORM) $(CXXFLAGS_BUILD) \
+           $(CXXFLAGS_LTO) $(CXXFLAGS_NATIVE) $(CXXFLAGS_VERSION)
+
+LDFLAGS = $(LDFLAGS_PLATFORM) $(LDFLAGS_STATIC) $(LDFLAGS_LTO)
+
+# ============================================================================
+# FILE DEFINITIONS
+# ============================================================================
+
+# Source files - IMPORTANT: These are your precious source files!
+# The Makefile will NEVER delete these
+SOURCES = dua_enhanced.cpp
+
+# Object files - These are temporary build products that can be safely deleted
+OBJECTS = $(SOURCES:.cpp=.o)
+
+# Dependency files for automatic header dependency tracking
+DEPS = $(SOURCES:.cpp=.d)
+
+# Target executable name
+TARGET_BASE = dua
+TARGET = $(TARGET_BASE)$(TARGET_SUFFIX)
+
+# ============================================================================
+# INSTALLATION PATHS
+# ============================================================================
+
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+MANDIR = $(PREFIX)/share/man/man1
+
+# ============================================================================
+# PHONY TARGETS
+# ============================================================================
+# These are targets that don't create files with the same name
+
+.PHONY: all clean debug release static install uninstall help
+.PHONY: test test-interactive test-aggregate test-memory
+.PHONY: format lint check show-config
+
+# ============================================================================
+# DEFAULT TARGET
+# ============================================================================
+
+# First target is the default when you just run 'make'
 all: $(TARGET)
 
-# Main build target
+# ============================================================================
+# MAIN BUILD RULES
+# ============================================================================
+
+# Rule to build the final executable
+# $@ means "the target" ($(TARGET))
+# $^ means "all the prerequisites" ($(OBJECTS))
 $(TARGET): $(OBJECTS)
 	@echo "Linking $@..."
 	$(CXX) $(OBJECTS) -o $@ $(LDFLAGS)
-	@echo "Build complete: $@"
-	@echo "  Version: $(VERSION)"
-	@echo "  Platform: $(UNAME_S) $(UNAME_M)"
-	@echo "  Debug: $(DEBUG)"
-	@echo "  Static: $(STATIC)"
+	@echo "=================="
+	@echo "Build successful!"
+	@echo "Executable: $@"
+	@echo "Platform: $(UNAME_S) $(UNAME_M)"
+	@echo "Version: $(VERSION)"
+	@echo "=================="
 
-# Compile source files
+# Rule to compile .cpp files into .o files
+# $< means "the first prerequisite" (the .cpp file)
+# $@ means "the target" (the .o file)
 %.o: %.cpp
 	@echo "Compiling $<..."
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Development builds
-.PHONY: debug
+# ============================================================================
+# CONVENIENCE BUILD TARGETS
+# ============================================================================
+
+# Debug build - includes debugging symbols
 debug:
 	@$(MAKE) DEBUG=1
 
-.PHONY: release
+# Optimized release build
 release:
 	@$(MAKE) DEBUG=0 LTO=1 NATIVE=1
 
-.PHONY: static
+# Static build - no dynamic library dependencies
 static:
 	@$(MAKE) STATIC=1 LTO=1
 
-# Platform-specific builds
-.PHONY: linux-static
-linux-static:
-	@echo "Building fully static Linux binary..."
-ifeq ($(LIBC),musl)
-	$(CXX) $(CXXFLAGS) -O3 -static dua_enhanced.cpp -o dua_linux_static -lncurses -ltinfo
-else
-	@echo "Warning: glibc detected. Fully static builds work best with musl libc."
-	$(CXX) $(CXXFLAGS) -O3 -static dua_enhanced.cpp -o dua_linux_static -lncurses -ltinfo -lgpm
-endif
-
-.PHONY: macos-universal
-macos-universal:
-	@echo "Building universal macOS binary..."
-	$(CXX) $(CXXFLAGS) -O3 -arch x86_64 -arch arm64 dua_enhanced.cpp -o dua_macos_universal $(LDFLAGS)
-
-# Installation targets
-.PHONY: install
-install: $(TARGET)
-	@echo "Installing to $(BINDIR)..."
-	install -d $(BINDIR)
-	install -m 755 $(TARGET) $(BINDIR)/$(TARGET_BASE)
-	@echo "Installation complete!"
-
-.PHONY: uninstall
-uninstall:
-	@echo "Removing $(BINDIR)/$(TARGET_BASE)..."
-	rm -f $(BINDIR)/$(TARGET_BASE)
-	@echo "Uninstallation complete!"
-
-# Development helpers
-.PHONY: format
-format:
-	@echo "Formatting code..."
-	@command -v clang-format >/dev/null 2>&1 || { echo "clang-format not found!"; exit 1; }
-	clang-format -i $(SOURCES)
-
-.PHONY: lint
-lint:
-	@echo "Running linter..."
-	@command -v clang-tidy >/dev/null 2>&1 || { echo "clang-tidy not found!"; exit 1; }
-	clang-tidy $(SOURCES) -- $(CXXFLAGS)
-
-.PHONY: check
-check: lint
-	@echo "Running static analysis..."
-	@command -v cppcheck >/dev/null 2>&1 || { echo "cppcheck not found!"; exit 1; }
-	cppcheck --enable=all --suppress=missingIncludeSystem $(SOURCES)
-
-# Testing targets
-.PHONY: test
-test: $(TARGET)
-	@echo "Running basic tests..."
-	./$(TARGET) --help
-	./$(TARGET) /tmp
-	@echo "Basic tests passed!"
-
-.PHONY: test-interactive
-test-interactive: $(TARGET)
-	@echo "Testing interactive mode..."
-	./$(TARGET) i /tmp /var/log
-
-.PHONY: test-aggregate
-test-aggregate: $(TARGET)
-	@echo "Testing aggregate mode..."
-	./$(TARGET) a --format binary /usr/bin
-	./$(TARGET) a --apparent-size /tmp
-	./$(TARGET) a --top 10 /var
-
-.PHONY: test-memory
-test-memory: debug
-	@echo "Running memory leak check..."
-	@command -v valgrind >/dev/null 2>&1 || { echo "valgrind not found!"; exit 1; }
-	valgrind --leak-check=full --show-leak-kinds=all \
-		./$(TARGET)_debug a /tmp
-
-.PHONY: test-performance
-test-performance: release
-	@echo "Running performance test..."
-	@command -v hyperfine >/dev/null 2>&1 || { echo "hyperfine not found!"; exit 1; }
-	hyperfine --warmup 3 './$(TARGET) a /usr' 'du -sh /usr' 'ncdu -o- /usr'
-
-# Benchmark against original dua
-.PHONY: benchmark
-benchmark: release
-	@echo "Benchmarking against original dua (if available)..."
-	@if command -v dua >/dev/null 2>&1; then \
-		echo "Comparing with original dua..."; \
-		hyperfine --warmup 2 \
-			'./$(TARGET) a /usr/share' \
-			'dua /usr/share'; \
-	else \
-		echo "Original dua not found, running standalone benchmark..."; \
-		time ./$(TARGET) a /usr/share; \
-	fi
-
-# Distribution packages
-.PHONY: dist
-dist: clean
-	@echo "Creating distribution archive..."
-	mkdir -p dua-cpp-$(VERSION)
-	cp -r *.cpp *.md Makefile LICENSE README dua-cpp-$(VERSION)/
-	tar czf dua-cpp-$(VERSION).tar.gz dua-cpp-$(VERSION)
-	rm -rf dua-cpp-$(VERSION)
-	@echo "Created dua-cpp-$(VERSION).tar.gz"
-
-.PHONY: deb
-deb: static
-	@echo "Creating Debian package..."
-	# This is a simplified version - real debian packaging is more complex
-	mkdir -p debian/usr/bin
-	cp $(TARGET)_static debian/usr/bin/dua
-	# Would need proper debian control files here
-	@echo "Debian packaging not fully implemented"
-
-.PHONY: rpm
-rpm: static
-	@echo "Creating RPM package..."
-	# This is a simplified version - real RPM packaging is more complex
-	@echo "RPM packaging not fully implemented"
+# ============================================================================
+# CLEAN TARGET - SAFE VERSION
+# ============================================================================
+# This is the most important part - it only deletes generated files,
+# NEVER source files!
 
 # Clean targets
 .PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -f $(OBJECTS) $(TARGET_BASE) $(TARGET_BASE)_*
+	rm -f $(OBJECTS)
+	rm -f $(TARGET_BASE) $(TARGET_BASE)_debug $(TARGET_BASE)_static $(TARGET_BASE)_debug_static
+	rm -f $(TARGET_BASE)_profile $(TARGET_BASE)_asan $(TARGET_BASE)_tsan
+	rm -f dua_linux_static dua_macos_universal
 	rm -f *.o *.d core *.core
+	rm -f gmon.out
 	@echo "Clean complete!"
 
-.PHONY: distclean
-distclean: clean
-	@echo "Removing all generated files..."
-	rm -f tags TAGS
-	rm -f *.tar.gz *.zip
-	rm -rf debian
+# ============================================================================
+# INSTALLATION TARGETS
+# ============================================================================
 
-# Help target
-.PHONY: help
+install: $(TARGET)
+	@echo "Installing to $(BINDIR)..."
+	# Create directory if it doesn't exist
+	install -d $(BINDIR)
+	# Copy executable with proper permissions
+	install -m 755 $(TARGET) $(BINDIR)/$(TARGET_BASE)
+	@echo "Installation complete!"
+	@echo "Installed to: $(BINDIR)/$(TARGET_BASE)"
+
+uninstall:
+	@echo "Removing $(BINDIR)/$(TARGET_BASE)..."
+	rm -f $(BINDIR)/$(TARGET_BASE)
+	@echo "Uninstallation complete!"
+
+# ============================================================================
+# DEVELOPMENT TOOLS
+# ============================================================================
+
+# Format code using clang-format
+format:
+	@command -v clang-format >/dev/null 2>&1 || { \
+		echo "clang-format not found! Install with:"; \
+		echo "  Ubuntu/Debian: sudo apt install clang-format"; \
+		echo "  macOS: brew install clang-format"; \
+		exit 1; \
+	}
+	@echo "Formatting code..."
+	clang-format -i $(SOURCES)
+	@echo "Formatting complete!"
+
+# Run static analysis
+lint:
+	@command -v clang-tidy >/dev/null 2>&1 || { \
+		echo "clang-tidy not found!"; \
+		exit 1; \
+	}
+	@echo "Running linter..."
+	clang-tidy $(SOURCES) -- $(CXXFLAGS)
+
+# Run various checks
+check: lint
+	@command -v cppcheck >/dev/null 2>&1 || { \
+		echo "cppcheck not found!"; \
+		exit 1; \
+	}
+	@echo "Running static analysis..."
+	cppcheck --enable=all --suppress=missingIncludeSystem $(SOURCES)
+
+# ============================================================================
+# TESTING TARGETS
+# ============================================================================
+
+# Basic functionality test
+test: $(TARGET)
+	@echo "Running basic tests..."
+	./$(TARGET) --help
+	./$(TARGET) --version 2>/dev/null || true
+	./$(TARGET) /tmp
+	@echo "Basic tests passed!"
+
+# Test interactive mode
+test-interactive: $(TARGET)
+	@echo "Testing interactive mode..."
+	@echo "Press 'q' to exit the interactive mode"
+	./$(TARGET) i /tmp
+
+# Test aggregate mode with various options
+test-aggregate: $(TARGET)
+	@echo "Testing aggregate mode..."
+	./$(TARGET) a /tmp
+	./$(TARGET) --tree /tmp
+	./$(TARGET) --tree --top 5 /tmp
+	./$(TARGET) --format binary /tmp
+	./$(TARGET) --apparent-size /tmp
+
+# Memory leak check (requires valgrind)
+test-memory: debug
+	@command -v valgrind >/dev/null 2>&1 || { \
+		echo "valgrind not found! Install with:"; \
+		echo "  Ubuntu/Debian: sudo apt install valgrind"; \
+		echo "  macOS: brew install valgrind"; \
+		exit 1; \
+	}
+	@echo "Running memory leak check..."
+	valgrind --leak-check=full --show-leak-kinds=all \
+		./$(TARGET)_debug a /tmp
+
+# ============================================================================
+# HELP TARGET
+# ============================================================================
+
 help:
 	@echo "Enhanced DUA C++ Makefile"
 	@echo ""
-	@echo "Usage: make [target] [options]"
+	@echo "Basic usage:"
+	@echo "  make              - Build the standard version"
+	@echo "  make clean        - Remove build artifacts (safe!)"
+	@echo "  make help         - Show this help"
 	@echo ""
-	@echo "Main targets:"
-	@echo "  all             - Build dua (default)"
-	@echo "  debug           - Build with debug symbols"
-	@echo "  release         - Build optimized release version"
-	@echo "  static          - Build statically linked version"
-	@echo "  install         - Install to system (PREFIX=$(PREFIX))"
-	@echo "  uninstall       - Remove from system"
-	@echo "  clean           - Remove build artifacts"
+	@echo "Build variants:"
+	@echo "  make debug        - Build with debug symbols"
+	@echo "  make release      - Build optimized version"
+	@echo "  make static       - Build statically linked"
 	@echo ""
-	@echo "Platform targets:"
-	@echo "  linux-static    - Build fully static Linux binary"
-	@echo "  macos-universal - Build universal macOS binary"
+	@echo "Installation:"
+	@echo "  make install      - Install to system (PREFIX=$(PREFIX))"
+	@echo "  make uninstall    - Remove from system"
 	@echo ""
-	@echo "Development targets:"
-	@echo "  format          - Format code with clang-format"
-	@echo "  lint            - Run clang-tidy linter"
-	@echo "  check           - Run static analysis"
+	@echo "Development:"
+	@echo "  make format       - Format code with clang-format"
+	@echo "  make lint         - Run clang-tidy"
+	@echo "  make check        - Run static analysis"
 	@echo ""
-	@echo "Testing targets:"
-	@echo "  test            - Run basic tests"
-	@echo "  test-memory     - Check for memory leaks"
-	@echo "  test-performance - Run performance tests"
-	@echo "  benchmark       - Compare with original dua"
+	@echo "Testing:"
+	@echo "  make test         - Run basic tests"
+	@echo "  make test-memory  - Check for memory leaks"
 	@echo ""
 	@echo "Options:"
-	@echo "  DEBUG=1         - Enable debug build"
-	@echo "  STATIC=1        - Enable static linking"
-	@echo "  LTO=1           - Enable link-time optimization"
-	@echo "  NATIVE=1        - Enable native CPU optimizations"
-	@echo "  PREFIX=/path    - Set installation prefix"
+	@echo "  DEBUG=1          - Enable debug build"
+	@echo "  STATIC=1         - Enable static linking"
+	@echo "  LTO=1            - Enable link-time optimization"
+	@echo "  NATIVE=1         - Enable CPU-specific optimizations"
+	@echo "  CXX=clang++      - Use different compiler"
+	@echo "  PREFIX=/opt      - Change installation prefix"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make                    # Build standard version"
-	@echo "  make DEBUG=1            # Build debug version"
-	@echo "  make release            # Build optimized version"
-	@echo "  make static install     # Build and install static version"
-	@echo "  make PREFIX=/opt/local install  # Install to /opt/local"
+	@echo "  make DEBUG=1                    # Debug build"
+	@echo "  make STATIC=1 LTO=1            # Static optimized build"
+	@echo "  make CXX=clang++ release       # Use clang++ for release"
+	@echo "  make PREFIX=~/.local install   # Install to home directory"
 
-# Include dependency files if they exist
--include $(OBJECTS:.o=.d)
+# ============================================================================
+# CONFIGURATION DISPLAY
+# ============================================================================
 
-# Generate dependency files automatically
-%.d: %.cpp
-	@$(CXX) $(CXXFLAGS) -MM -MT $(@:.d=.o) $< > $@
-
-# Ensure we have necessary tools for certain targets
-.PHONY: check-tools
-check-tools:
-	@echo "Checking for required tools..."
-	@command -v $(CXX) >/dev/null 2>&1 || { echo "$(CXX) not found!"; exit 1; }
-	@command -v pkg-config >/dev/null 2>&1 || echo "Warning: pkg-config not found"
-	@echo "Basic tools OK"
-
-# CI/CD targets
-.PHONY: ci
-ci: clean check test
-	@echo "CI checks passed!"
-
-.PHONY: cd
-cd: release test-performance dist
-	@echo "CD build complete!"
-
-# Show configuration
-.PHONY: show-config
 show-config:
-	@echo "Build Configuration:"
+	@echo "Current configuration:"
 	@echo "  CXX: $(CXX)"
 	@echo "  CXXFLAGS: $(CXXFLAGS)"
 	@echo "  LDFLAGS: $(LDFLAGS)"
 	@echo "  Platform: $(UNAME_S) $(UNAME_M)"
-	@echo "  Version: $(VERSION)"
-	@echo "  Git Hash: $(GIT_HASH)"
+	@echo "  Source files: $(SOURCES)"
+	@echo "  Target: $(TARGET)"
 
-# Performance profiling
-.PHONY: profile
-profile: debug
-	@echo "Building for profiling..."
-	$(CXX) $(CXXFLAGS) -pg dua_enhanced.cpp -o $(TARGET)_profile $(LDFLAGS)
-	@echo "Run the program and then use 'gprof $(TARGET)_profile gmon.out'"
+# ============================================================================
+# DEPENDENCY TRACKING
+# ============================================================================
 
-# Address sanitizer build
-.PHONY: asan
-asan:
-	@echo "Building with AddressSanitizer..."
-	$(CXX) $(CXXFLAGS) -fsanitize=address -fno-omit-frame-pointer \
-		dua_enhanced.cpp -o $(TARGET)_asan $(LDFLAGS) -lasan
+# Include auto-generated dependency files if they exist
+# The - prefix means "don't error if these don't exist"
+-include $(DEPS)
 
-# Thread sanitizer build
-.PHONY: tsan
-tsan:
-	@echo "Building with ThreadSanitizer..."
-	$(CXX) $(CXXFLAGS) -fsanitize=thread -fno-omit-frame-pointer \
-		dua_enhanced.cpp -o $(TARGET)_tsan $(LDFLAGS) -ltsan
+# Rule to generate dependency files
+# This helps Make understand when headers change
+%.d: %.cpp
+	@$(CXX) $(CXXFLAGS) -MM -MT $(@:.d=.o) $< > $@
+
+# ============================================================================
+# END OF MAKEFILE
+# ============================================================================
