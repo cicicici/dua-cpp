@@ -1,0 +1,216 @@
+# DUA-CLI C++ Implementation
+
+A fast disk usage analyzer written in C++ as a reimplementation of the original Rust-based [dua-cli](https://github.com/Byron/dua-cli).
+
+## Features
+
+- **Fast Parallel Scanning**: Utilizes multiple threads to maximize disk I/O performance
+- **Interactive Terminal UI**: Browse through directories and files with an ncurses-based interface
+- **Tree View**: Display disk usage in a hierarchical tree format
+- **Deletion Support**: Safely delete files and directories from within the interactive mode
+- **Sorting Options**: Sort by size or name
+- **Colored Output**: Visual distinction between files and directories
+- **Cross-platform**: Works on Linux, macOS, and other Unix-like systems
+
+## Requirements
+
+- C++17 compatible compiler (GCC 8+, Clang 7+)
+- ncurses library for the interactive UI
+- POSIX-compliant system (Linux, macOS, BSD)
+
+## Building
+
+### Quick Build
+
+```bash
+make
+```
+
+### Debug Build
+
+```bash
+make debug
+```
+
+### Static Build (for better portability)
+
+```bash
+make static
+```
+
+## Installation
+
+### System-wide Installation
+
+```bash
+sudo make install
+```
+
+This installs the binary to `/usr/local/bin`. You can change the prefix:
+
+```bash
+make install PREFIX=/home/user/.local
+```
+
+### Uninstallation
+
+```bash
+sudo make uninstall
+```
+
+## Usage
+
+### Basic Usage
+
+```bash
+# Analyze current directory
+dua
+
+# Analyze specific directory
+dua /path/to/directory
+
+# Analyze all non-hidden directories
+dua *
+```
+
+### Interactive Mode
+
+Launch the interactive terminal UI:
+
+```bash
+dua -i
+dua --interactive
+```
+
+#### Interactive Mode Shortcuts
+
+- `↑/k` - Move up
+- `↓/j` - Move down  
+- `→/l/Enter` - Enter directory
+- `←/h/Backspace` - Go back
+- `d` - Delete selected item (with confirmation)
+- `s` - Sort by size
+- `n` - Sort by name
+- `?` - Toggle help
+- `q` - Quit
+
+### Command-line Options
+
+```bash
+-h, --help         Show help message
+-i, --interactive  Launch interactive mode
+-d, --depth N      Maximum depth to traverse
+-t, --top N        Show only top N entries by size
+--no-colors        Disable colored output
+```
+
+### Examples
+
+```bash
+# Show top 10 largest items
+dua -t 10 /home
+
+# Limit depth to 3 levels
+dua -d 3 /var
+
+# Analyze without colors (for piping)
+dua --no-colors | less
+
+# Interactive mode for system directories
+sudo dua -i /
+```
+
+## Performance
+
+The C++ implementation uses parallel scanning with thread pooling to maximize performance:
+
+- Automatically uses all available CPU cores
+- Memory-efficient streaming approach
+- Handles millions of files without issues
+- Skip inaccessible files gracefully
+
+## Differences from Original dua-cli
+
+This C++ implementation aims to provide similar functionality to the original Rust version with some differences:
+
+- Uses ncurses for the TUI instead of crossterm
+- Simplified command structure (no subcommands)
+- All features in a single binary
+- Platform-specific optimizations for POSIX systems
+
+## Building on Different Platforms
+
+### Ubuntu/Debian
+
+```bash
+sudo apt-get install build-essential libncurses5-dev
+make
+```
+
+### Fedora/RHEL
+
+```bash
+sudo dnf install gcc-c++ ncurses-devel
+make
+```
+
+### macOS
+
+```bash
+# Install Xcode Command Line Tools if needed
+xcode-select --install
+
+# Using Homebrew
+brew install ncurses
+make
+```
+
+### FreeBSD
+
+```bash
+pkg install ncurses
+gmake
+```
+
+## Troubleshooting
+
+### Compilation Errors
+
+If you get filesystem-related errors, ensure your compiler supports C++17:
+
+```bash
+g++ --version  # Should be 8.0 or higher
+```
+
+### Missing ncurses
+
+Install ncurses development package for your distribution:
+- Debian/Ubuntu: `libncurses5-dev` or `libncurses6-dev`
+- Fedora: `ncurses-devel`
+- Arch: `ncurses`
+- macOS: `brew install ncurses`
+
+### Permission Denied
+
+Some system directories require elevated privileges:
+
+```bash
+sudo dua -i /var
+```
+
+## Contributing
+
+This is a reimplementation project. For improvements specific to this C++ version:
+
+1. Ensure code follows C++17 standards
+2. Test on multiple platforms
+3. Update documentation as needed
+4. Performance improvements are always welcome
+
+## License
+
+This implementation follows the same license as the original dua-cli project. See the original repository for license details.
+
+## Acknowledgments
+
+This C++ implementation is inspired by the excellent [dua-cli](https://github.com/Byron/dua-cli) project by Sebastian Thiel (Byron).
