@@ -58,6 +58,9 @@ const std::string CYAN = "\033[36m";
 const std::string BOLD = "\033[1m";
 const std::string GRAY = "\033[90m";
 
+// Progress reporting constants
+const std::string CLEAR_LINE = "\033[2K\r";
+
 // Forward declarations
 class ThreadPool;
 class OptimizedScanner;
@@ -81,12 +84,47 @@ struct Config {
     bool use_trash = false;
     bool no_colors = false;  // Default to colors enabled
     bool tree_mode = false;  // Display as tree instead of flat list
+    bool show_progress = true;  // Show progress during scan
     int max_depth = -1;
     int top_n = -1;
     size_t thread_count = 0;
     std::string format = "metric";  // metric, binary, bytes, gb, gib, mb, mib
     std::set<fs::path> ignore_dirs;
     std::vector<fs::path> paths;
+};
+
+// Progress throttle class
+class ProgressThrottle {
+private:
+    std::chrono::steady_clock::time_point last_update;
+    std::chrono::milliseconds update_interval;
+    bool is_tty;
+    std::mutex mutex;
+    
+public:
+    ProgressThrottle(std::chrono::milliseconds interval = std::chrono::milliseconds(100)) 
+        : update_interval(interval) {
+        is_tty = isatty(fileno(stderr));
+        last_update = std::chrono::steady_clock::now();
+    }
+    
+    bool should_update() {
+        if (!is_tty) return false;
+        
+        std::lock_guard<std::mutex> lock(mutex);
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_update >= update_interval) {
+            last_update = now;
+            return true;
+        }
+        return false;
+    }
+    
+    void clear_line() {
+        if (is_tty) {
+            std::cerr << CLEAR_LINE << std::flush;
+        }
+    }
 };
 
 // Enhanced entry structure with more metadata
@@ -336,7 +374,9 @@ private:
     std::atomic<size_t> file_count{0};
     std::atomic<size_t> dir_count{0};
     std::atomic<size_t> io_errors{0};
+    std::atomic<size_t> entries_traversed{0};
     std::chrono::steady_clock::time_point start_time;
+    ProgressThrottle progress_throttle;
     
     // Hard link tracking
     struct InodeKey {
@@ -382,6 +422,13 @@ private:
         return config.ignore_dirs.find(canonical_path) != config.ignore_dirs.end();
     }
     
+    void update_progress() {
+        if (config.show_progress && progress_throttle.should_update()) {
+            size_t current_entries = entries_traversed.load();
+            std::cerr << "\rEnumerating " << current_entries << " items" << std::flush;
+        }
+    }
+    
     void scan_directory_impl(std::shared_ptr<Entry> entry, dev_t root_device) {
         try {
             if (entry->is_symlink) {
@@ -412,6 +459,9 @@ private:
                     if (child->is_symlink) {
                         continue;
                     }
+                    
+                    entries_traversed++;
+                    update_progress();
                     
                     if (item.is_directory()) {
                         child->is_directory = true;
@@ -482,7 +532,8 @@ private:
     }
     
 public:
-    OptimizedScanner(ThreadPool& tp, Config& cfg) : pool(tp), config(cfg) {
+    OptimizedScanner(ThreadPool& tp, Config& cfg) 
+        : pool(tp), config(cfg), progress_throttle(std::chrono::milliseconds(100)) {
         start_time = std::chrono::steady_clock::now();
     }
     
@@ -495,18 +546,27 @@ public:
             
             if (root->is_directory) {
                 dir_count++;
+                entries_traversed++;
+                update_progress();
                 scan_directory_impl(root, root->device_id);
             } else {
                 root->apparent_size = fs::file_size(path);
                 root->size = config.apparent_size ? root->apparent_size.load() : 
                            get_size_on_disk(path, root->apparent_size);
                 file_count++;
+                entries_traversed++;
+                update_progress();
             }
             
             roots.push_back(root);
         }
         
         pool.wait_all();
+        
+        // Clear progress line
+        if (config.show_progress) {
+            progress_throttle.clear_line();
+        }
         
         for (auto& root : roots) {
             total_size += calculate_sizes(root);
@@ -519,12 +579,12 @@ public:
         auto duration = std::chrono::steady_clock::now() - start_time;
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
         
-        std::cout << "\nScanned " << file_count << " files and " 
+        std::cerr << "\nScanned " << file_count << " files and " 
                   << dir_count << " directories in " << ms << "ms\n";
         if (io_errors > 0) {
-            std::cout << "Encountered " << io_errors << " I/O errors\n";
+            std::cerr << "Encountered " << io_errors << " I/O errors\n";
         }
-        std::cout << "Total size: " << format_size(total_size, config.format) << "\n";
+        std::cerr << "Total size: " << format_size(total_size, config.format) << "\n";
     }
 };
 
@@ -843,6 +903,11 @@ private:
         if (selected_index < current_view.size()) {
             auto selected = current_view[selected_index];
             if (selected->is_directory) {
+                // Show progress
+                clear();
+                mvprintw(LINES / 2, COLS / 2 - 10, "Refreshing...");
+                refresh();
+                
                 // Re-scan directory
                 ThreadPool pool(config.thread_count);
                 OptimizedScanner scanner(pool, config);
@@ -867,6 +932,11 @@ private:
     }
     
     void refresh_all() {
+        // Show progress
+        clear();
+        mvprintw(LINES / 2, COLS / 2 - 10, "Refreshing all...");
+        refresh();
+        
         ThreadPool pool(config.thread_count);
         OptimizedScanner scanner(pool, config);
         
@@ -1536,7 +1606,8 @@ void print_usage(const char* program_name) {
     std::cout << "  -j, --threads N         Number of threads (default: auto)\n";
     std::cout << "  -i, --ignore-dirs DIR   Directories to ignore (can be repeated)\n";
     std::cout << "  --no-entry-check        Don't check entries for presence (faster but may show stale data)\n";
-    std::cout << "  --no-colors             Disable colored output\n\n";
+    std::cout << "  --no-colors             Disable colored output\n";
+    std::cout << "  --no-progress           Disable progress reporting\n\n";
     std::cout << "If no path is provided, the current directory is used.\n";
 }
 
@@ -1568,6 +1639,8 @@ int main(int argc, char* argv[]) {
             config.no_entry_check = true;
         } else if (arg == "--no-colors") {
             config.no_colors = true;
+        } else if (arg == "--no-progress") {
+            config.show_progress = false;
         } else if (arg == "-d" || arg == "--depth") {
             if (i + 1 < args.size()) {
                 config.max_depth = std::stoi(args[++i]);
@@ -1626,8 +1699,6 @@ int main(int argc, char* argv[]) {
     
     // Run appropriate mode
     if (config.interactive_mode) {
-        std::cout << "Scanning...\n";
-        
         ThreadPool pool(config.thread_count);
         OptimizedScanner scanner(pool, config);
         
@@ -1636,8 +1707,6 @@ int main(int argc, char* argv[]) {
         auto end = std::chrono::high_resolution_clock::now();
         
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        std::cout << "\nScan completed in " << duration.count() << "ms\n";
-        scanner.print_stats();
         
         InteractiveUI ui(roots, config);
         ui.run();
