@@ -100,7 +100,7 @@ endif
 # VERSION INFORMATION
 # ============================================================================
 
-VERSION = 1.1.0
+VERSION = 1.2.0
 GIT_HASH = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE = $(shell date +%Y-%m-%d)
 
@@ -125,7 +125,7 @@ LDFLAGS = $(LDFLAGS_PLATFORM) $(LDFLAGS_STATIC) $(LDFLAGS_LTO)
 
 # Source files - IMPORTANT: These are your precious source files!
 # The Makefile will NEVER delete these
-SOURCES = dua_enhanced.cpp
+SOURCES = dua_enhanced.cpp dua_core.cpp dua_ui.cpp
 
 # Object files - These are temporary build products that can be safely deleted
 OBJECTS = $(SOURCES:.cpp=.o)
