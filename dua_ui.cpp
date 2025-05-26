@@ -982,6 +982,7 @@ bool InteractiveUI::handle_key(int ch) {
                 needs_full_redraw = true;
             } else if (selected_index < current_view.size()) {
                 current_view[selected_index]->marked = true;
+                mark_pane.update_marked_items(roots);  // Update mark pane
                 navigate_down();
                 check_mark_pane_visibility();
             }
@@ -1195,6 +1196,9 @@ void InteractiveUI::toggle_mark() {
     if (selected_index < current_view.size()) {
         auto entry = current_view[selected_index];
         entry->marked = !entry->marked.load();
+        
+        // Update the mark pane with current marked items
+        mark_pane.update_marked_items(roots);
     }
 }
 
@@ -1203,6 +1207,9 @@ void InteractiveUI::toggle_all_marks() {
     for (auto& entry : current_view) {
         entry->marked = !any_marked;
     }
+    
+    // Update the mark pane with current marked items
+    mark_pane.update_marked_items(roots);
 }
 
 bool InteractiveUI::has_marked_items() {
