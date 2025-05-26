@@ -167,6 +167,9 @@ private:
     // Refreshing
     void refresh_selected();
     void refresh_all();
+    
+    // Window management
+    void handle_resize();
     void update_view();
     
     // Drawing

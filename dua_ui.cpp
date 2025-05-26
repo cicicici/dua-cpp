@@ -327,6 +327,12 @@ void InteractiveUI::run() {
         
         int ch = getch();
         if (ch != ERR) {
+            // Handle terminal resize
+            if (ch == KEY_RESIZE) {
+                handle_resize();
+                continue;
+            }
+            
             auto now = std::chrono::steady_clock::now();
             bool is_movement = (ch == KEY_UP || ch == KEY_DOWN || ch == 'j' || ch == 'k');
             
@@ -1420,6 +1426,38 @@ void InteractiveUI::refresh_all() {
     update_view();
     selected_index = 0;
     view_offset = 0;
+}
+
+void InteractiveUI::handle_resize() {
+    // Clear and refresh the standard screen
+    clear();
+    refresh();
+    
+    // Delete existing windows
+    if (main_win) {
+        delwin(main_win);
+        main_win = nullptr;
+    }
+    if (mark_win) {
+        delwin(mark_win);
+        mark_win = nullptr;
+    }
+    
+    // Recreate windows with new dimensions
+    update_window_layout();
+    
+    // Update cache dimensions
+    line_cache.clear();  // Clear cache to force rebuild with new dimensions
+    
+    // Force full redraw
+    needs_full_redraw = true;
+    
+    // Adjust view offset if necessary
+    int visible_lines = getmaxy(main_win) - 2;
+    if (view_offset > 0 && selected_index - view_offset >= static_cast<size_t>(visible_lines - 1)) {
+        view_offset = std::max(static_cast<size_t>(0), 
+                               selected_index - static_cast<size_t>(visible_lines) + 2);
+    }
 }
 
 void InteractiveUI::sort_by_size() {
