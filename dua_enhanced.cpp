@@ -1,5 +1,5 @@
 // dua_enhanced.cpp - Enhanced Disk Usage Analyzer main program
-// Version 1.2.0 - Refactored with modular architecture
+// Refactored with modular architecture
 
 #include "dua_core.h"
 #include "dua_ui.h"
@@ -19,6 +19,7 @@ const std::string CLEAR_LINE = "\033[2K\r";
 // Function declarations
 void aggregate_mode(Config& config);
 void print_usage(const char* program_name);
+void print_version();
 
 // Entry implementation
 Entry::Entry(const fs::path& p) : path(p) {
@@ -156,6 +157,7 @@ void aggregate_mode(Config& config) {
 }
 
 void print_usage(const char* program_name) {
+    std::cout << "dua " << DUA_VERSION << " - Disk Usage Analyzer\n";
     std::cout << "Usage: " << program_name << " [SUBCOMMAND] [OPTIONS] [PATH...]\n\n";
     std::cout << "A tool to conveniently learn about disk usage, fast!\n\n";
     std::cout << "Subcommands:\n";
@@ -163,6 +165,7 @@ void print_usage(const char* program_name) {
     std::cout << "  a, aggregate      Aggregate disk usage (default)\n\n";
     std::cout << "Options:\n";
     std::cout << "  -h, --help              Show this help message\n";
+    std::cout << "  -v, --version           Show version information\n";
     std::cout << "  -A, --apparent-size     Display apparent size instead of disk usage\n";
     std::cout << "  -l, --count-hard-links  Count hard-linked files each time they are seen\n";
     std::cout << "  -x, --stay-on-filesystem Don't cross filesystem boundaries\n";
@@ -178,6 +181,12 @@ void print_usage(const char* program_name) {
     std::cout << "If no path is provided, the current directory is used.\n";
 }
 
+void print_version() {
+    std::cout << "dua " << DUA_VERSION << "\n";
+    std::cout << "Build date: " << BUILD_DATE << "\n";
+    std::cout << "Git hash: " << GIT_HASH << "\n";
+}
+
 int main(int argc, char* argv[]) {
     Config config;
     std::string subcommand;
@@ -189,6 +198,9 @@ int main(int argc, char* argv[]) {
         
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
+            return 0;
+        } else if (arg == "-v" || arg == "--version") {
+            print_version();
             return 0;
         } else if (arg == "i" || arg == "interactive") {
             config.interactive_mode = true;

@@ -76,6 +76,13 @@ This is a C++ implementation of dua-cli (Disk Usage Analyzer) with a modular arc
 
 ## Common Development Tasks
 
+### Version Management
+
+The version is defined in the Makefile as `VERSION` and passed to the code as `DUA_VERSION`. To update the version:
+1. Edit the `VERSION` variable in Makefile (currently 1.2.0)
+2. The version will be automatically included in builds
+3. Access version in code using `DUA_VERSION` macro
+
 ### Adding New Features
 
 When adding features, follow the existing patterns:
