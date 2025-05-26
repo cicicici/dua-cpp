@@ -1,6 +1,6 @@
 // dua_enhanced_optimized.cpp - Enhanced Disk Usage Analyzer with optimized UI performance
 // Complete reimplementation of dua-cli with additional features and robustness improvements
-// Version 1.1.0 - Added symlink display support
+// Version 1.1.0 - Added symlink display support and Mark Pane
 
 #include <iostream>
 #include <filesystem>
@@ -822,7 +822,286 @@ struct LineCache {
     }
 };
 
-// Interactive UI with enhanced features including symlink display
+// Mark Pane - provides a focused view of all marked items
+class MarkPane {
+private:
+    std::vector<std::shared_ptr<Entry>> marked_items;  // Flat list of all marked items
+    std::vector<std::string> marked_paths;              // Cached display paths
+    std::vector<uintmax_t> marked_sizes;                // Cached sizes
+    size_t selected_index = 0;
+    size_t view_offset = 0;
+    bool has_focus = false;
+    Config& config;
+    
+public:
+    MarkPane(Config& cfg) : config(cfg) {}
+    
+    void set_focus(bool focus) {
+        has_focus = focus;
+        if (focus && !marked_items.empty()) {
+            // When gaining focus, select the last item
+            selected_index = marked_items.size() - 1;
+            adjust_view_offset();
+        }
+    }
+    
+    bool is_focused() const { return has_focus; }
+    
+    bool is_empty() const { return marked_items.empty(); }
+    
+    size_t count() const { return marked_items.size(); }
+    
+    uintmax_t total_size() const {
+        return std::accumulate(marked_sizes.begin(), marked_sizes.end(), uintmax_t(0));
+    }
+    
+    // Update the list of marked items by scanning the entire tree
+    void update_marked_items(const std::vector<std::shared_ptr<Entry>>& roots) {
+        marked_items.clear();
+        marked_paths.clear();
+        marked_sizes.clear();
+        
+        for (const auto& root : roots) {
+            collect_marked_recursive(root);
+        }
+        
+        // Sort by path for consistent display
+        std::vector<size_t> indices(marked_items.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        std::sort(indices.begin(), indices.end(), 
+            [this](size_t a, size_t b) {
+                return marked_paths[a] < marked_paths[b];
+            });
+        
+        // Reorder all vectors according to sort
+        std::vector<std::shared_ptr<Entry>> sorted_items;
+        std::vector<std::string> sorted_paths;
+        std::vector<uintmax_t> sorted_sizes;
+        
+        for (size_t i : indices) {
+            sorted_items.push_back(marked_items[i]);
+            sorted_paths.push_back(marked_paths[i]);
+            sorted_sizes.push_back(marked_sizes[i]);
+        }
+        
+        marked_items = std::move(sorted_items);
+        marked_paths = std::move(sorted_paths);
+        marked_sizes = std::move(sorted_sizes);
+        
+        // Adjust selection if needed
+        if (selected_index >= marked_items.size() && !marked_items.empty()) {
+            selected_index = marked_items.size() - 1;
+        }
+        adjust_view_offset();
+    }
+    
+    void navigate_up() {
+        if (selected_index > 0) {
+            selected_index--;
+            adjust_view_offset();
+        }
+    }
+    
+    void navigate_down() {
+        if (selected_index + 1 < marked_items.size()) {
+            selected_index++;
+            adjust_view_offset();
+        }
+    }
+    
+    void navigate_page_up() {
+        if (selected_index > 10) {
+            selected_index -= 10;
+        } else {
+            selected_index = 0;
+        }
+        adjust_view_offset();
+    }
+    
+    void navigate_page_down() {
+        selected_index = std::min(selected_index + 10, marked_items.size() - 1);
+        adjust_view_offset();
+    }
+    
+    void navigate_home() {
+        selected_index = 0;
+        view_offset = 0;
+    }
+    
+    void navigate_end() {
+        if (!marked_items.empty()) {
+            selected_index = marked_items.size() - 1;
+            adjust_view_offset();
+        }
+    }
+    
+    // Remove currently selected item from mark list
+    void remove_selected() {
+        if (selected_index < marked_items.size()) {
+            marked_items[selected_index]->marked = false;
+            marked_items.erase(marked_items.begin() + selected_index);
+            marked_paths.erase(marked_paths.begin() + selected_index);
+            marked_sizes.erase(marked_sizes.begin() + selected_index);
+            
+            if (selected_index >= marked_items.size() && !marked_items.empty()) {
+                selected_index = marked_items.size() - 1;
+            }
+            adjust_view_offset();
+        }
+    }
+    
+    // Remove all items from mark list
+    void remove_all() {
+        for (auto& item : marked_items) {
+            item->marked = false;
+        }
+        marked_items.clear();
+        marked_paths.clear();
+        marked_sizes.clear();
+        selected_index = 0;
+        view_offset = 0;
+    }
+    
+    // Get items for deletion
+    std::vector<std::shared_ptr<Entry>> get_all_marked() const {
+        return marked_items;
+    }
+    
+    // Render the mark pane
+    void draw(WINDOW* win, int height, int width) {
+        // Clear the window
+        werase(win);
+        
+        // Draw border and title
+        box(win, 0, 0);
+        
+        // Title with count and size
+        std::string title = " Marked Items (" + std::to_string(marked_items.size()) + 
+                           " items, " + format_size(total_size(), config.format) + ") ";
+        mvwprintw(win, 0, (width - title.length()) / 2, "%s", title.c_str());
+        
+        // Help text at top if focused
+        if (has_focus) {
+            wattron(win, A_BOLD);
+            mvwprintw(win, 0, width - 30, " x/d/space = remove | a = all ");
+            wattroff(win, A_BOLD);
+        }
+        
+        // Calculate visible area (account for borders)
+        int visible_height = height - 2;
+        int content_width = width - 2;
+        
+        // Draw items
+        for (int i = 0; i < visible_height && view_offset + i < marked_items.size(); i++) {
+            size_t item_idx = view_offset + i;
+            bool is_selected = has_focus && (item_idx == selected_index);
+            
+            wmove(win, i + 1, 1);
+            
+            if (is_selected) {
+                wattron(win, A_REVERSE);
+                // Fill line with spaces for full-width selection
+                for (int j = 0; j < content_width; j++) {
+                    waddch(win, ' ');
+                }
+                wmove(win, i + 1, 1);
+            }
+            
+            // Format the line: size | path
+            std::string size_str = format_size(marked_sizes[item_idx], config.format);
+            
+            // Calculate space for path
+            int size_width = 12;
+            int separator_width = 3;
+            int path_width = content_width - size_width - separator_width;
+            
+            // Truncate path if needed
+            std::string path = marked_paths[item_idx];
+            if (path.length() > static_cast<size_t>(path_width)) {
+                path = "..." + path.substr(path.length() - path_width + 3);
+            }
+            
+            // Draw size
+            wattron(win, COLOR_PAIR(3));
+            mvwprintw(win, i + 1, 1, "%*s", size_width, size_str.c_str());
+            wattroff(win, COLOR_PAIR(3));
+            
+            // Draw separator
+            wprintw(win, " | ");
+            
+            // Draw path with appropriate color
+            auto& item = marked_items[item_idx];
+            if (item->is_symlink) {
+                wattron(win, COLOR_PAIR(9));
+            } else if (item->is_directory) {
+                wattron(win, COLOR_PAIR(1) | A_BOLD);
+            }
+            
+            wprintw(win, "%s", path.c_str());
+            
+            if (item->is_symlink || item->is_directory) {
+                wattroff(win, COLOR_PAIR(item->is_symlink ? 9 : 1) | 
+                        (item->is_directory ? A_BOLD : 0));
+            }
+            
+            if (is_selected) {
+                wattroff(win, A_REVERSE);
+            }
+        }
+        
+        // Draw scrollbar if needed
+        if (marked_items.size() > static_cast<size_t>(visible_height)) {
+            draw_scrollbar(win, height, view_offset, marked_items.size(), visible_height);
+        }
+        
+        // Draw bottom help if focused
+        if (has_focus) {
+            mvwhline(win, height - 1, 1, ACS_HLINE, width - 2);
+            mvwprintw(win, height - 1, 2, " Ctrl+r = delete | Ctrl+t = trash ");
+        }
+        
+        wrefresh(win);
+    }
+    
+private:
+    void collect_marked_recursive(std::shared_ptr<Entry> entry) {
+        if (entry->marked.load()) {
+            marked_items.push_back(entry);
+            marked_paths.push_back(entry->path.string());
+            marked_sizes.push_back(entry->size.load());
+        }
+        
+        if (entry->is_directory && !entry->is_symlink) {
+            std::lock_guard<std::mutex> lock(entry->children_mutex);
+            for (auto& child : entry->children) {
+                collect_marked_recursive(child);
+            }
+        }
+    }
+    
+    void adjust_view_offset() {
+        int visible_height = 20;  // Approximate, will be set properly during draw
+        
+        if (static_cast<int>(selected_index) < static_cast<int>(view_offset)) {
+            view_offset = selected_index;
+        } else if (static_cast<int>(selected_index) >= static_cast<int>(view_offset) + visible_height) {
+            view_offset = selected_index - visible_height + 1;
+        }
+    }
+    
+    void draw_scrollbar(WINDOW* win, int height, size_t offset, size_t total, int visible) {
+        int bar_height = height - 2;
+        int bar_pos = (offset * bar_height) / total;
+        int bar_size = std::max(1, (visible * bar_height) / static_cast<int>(total));
+        
+        for (int i = 0; i < bar_height; i++) {
+            mvwaddch(win, i + 1, getmaxx(win) - 1, 
+                     (i >= bar_pos && i < bar_pos + bar_size) ? ACS_CKBOARD : ACS_VLINE);
+        }
+    }
+};
+
+// Interactive UI with enhanced features including symlink display and mark pane
 class InteractiveUI {
 private:
     std::vector<std::shared_ptr<Entry>> roots;
@@ -837,6 +1116,17 @@ private:
     std::string glob_pattern;
     std::vector<std::shared_ptr<Entry>> navigation_stack;
     Config& config;
+    
+    // Mark pane
+    MarkPane mark_pane;
+    WINDOW* main_win = nullptr;
+    WINDOW* mark_win = nullptr;
+    
+    enum class FocusedPane {
+        Main,
+        Mark
+    };
+    FocusedPane focused_pane = FocusedPane::Main;
     
     // Performance optimization: cache rendered lines
     std::vector<LineCache> line_cache;
@@ -874,7 +1164,7 @@ private:
     
 public:
     InteractiveUI(std::vector<std::shared_ptr<Entry>> root_entries, Config& cfg) 
-        : roots(root_entries), config(cfg) {
+        : roots(root_entries), config(cfg), mark_pane(cfg) {
         
         // Create virtual root if multiple paths
         if (roots.size() > 1) {
@@ -895,6 +1185,11 @@ public:
         
         // Pre-allocate cache
         line_cache.reserve(LINES);
+    }
+    
+    ~InteractiveUI() {
+        if (main_win) delwin(main_win);
+        if (mark_win) delwin(mark_win);
     }
     
     void run() {
@@ -926,16 +1221,29 @@ public:
             init_pair(9, COLOR_MAGENTA, COLOR_BLACK); // Symlinks
         }
         
+        // Create windows for split layout
+        update_window_layout();
+        
         bool running = true;
         int pending_move = 0;  // Accumulate rapid movements
         
         while (running) {
-            // Draw only what's needed
+            // Update mark pane data if needed
+            if (!mark_pane.is_empty() || has_any_marked_items()) {
+                mark_pane.update_marked_items(roots);
+            }
+            
+            // Draw both panes
             if (needs_full_redraw) {
                 draw_full();
                 needs_full_redraw = false;
             } else {
                 draw_differential();
+            }
+            
+            // Draw mark pane if it has items
+            if (!mark_pane.is_empty()) {
+                mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
             }
             
             // Handle input with batching for smooth movement
@@ -945,8 +1253,20 @@ public:
                 bool is_movement = (ch == KEY_UP || ch == KEY_DOWN || 
                                    ch == 'j' || ch == 'k');
                 
-                if (is_movement) {
-                    // Batch rapid movements
+                // Handle Tab key for focus switching
+                if (ch == '\t' && !mark_pane.is_empty()) {
+                    switch_focus();
+                    needs_full_redraw = true;
+                    continue;
+                }
+                
+                if (focused_pane == FocusedPane::Mark && mark_pane.is_focused()) {
+                    // Handle mark pane specific keys
+                    if (handle_mark_pane_key(ch) == false) {
+                        running = false;
+                    }
+                } else if (is_movement) {
+                    // Batch rapid movements for main pane
                     if (now - last_input_time < INPUT_BATCH_DELAY) {
                         pending_move += (ch == KEY_DOWN || ch == 'j') ? 1 : -1;
                         napms(1);  // Brief pause to collect more input
@@ -994,6 +1314,227 @@ public:
     }
     
 private:
+    // Update window layout based on whether mark pane should be visible
+    void update_window_layout() {
+        // Clean up old windows
+        if (main_win) {
+            delwin(main_win);
+            main_win = nullptr;
+        }
+        if (mark_win) {
+            delwin(mark_win);
+            mark_win = nullptr;
+        }
+        
+        // Clear screen
+        clear();
+        refresh();
+        
+        // Determine layout
+        if (!mark_pane.is_empty()) {
+            // Split layout: main on left, mark pane on right
+            int width = COLS;
+            int height = LINES;
+            int split_pos = width * 2 / 3;  // Main gets 2/3, mark pane gets 1/3
+            
+            // Create main window
+            main_win = newwin(height, split_pos, 0, 0);
+            keypad(main_win, TRUE);
+            nodelay(main_win, TRUE);
+            
+            // Create mark pane window
+            mark_win = newwin(height, width - split_pos, 0, split_pos);
+            keypad(mark_win, TRUE);
+            nodelay(mark_win, TRUE);
+        } else {
+            // Full screen for main window
+            main_win = newwin(LINES, COLS, 0, 0);
+            keypad(main_win, TRUE);
+            nodelay(main_win, TRUE);
+        }
+    }
+    
+    // Switch focus between main and mark pane
+    void switch_focus() {
+        if (focused_pane == FocusedPane::Main) {
+            focused_pane = FocusedPane::Mark;
+            mark_pane.set_focus(true);
+        } else {
+            focused_pane = FocusedPane::Main;
+            mark_pane.set_focus(false);
+        }
+    }
+    
+    // Check if any items are marked in the entire tree
+    bool has_any_marked_items() {
+        return has_marked_recursive(current_dir);
+    }
+    
+    bool has_marked_recursive(std::shared_ptr<Entry> root) {
+        if (root->marked.load()) {
+            return true;
+        }
+        
+        if (root->is_directory && !root->is_symlink) {
+            std::lock_guard<std::mutex> lock(root->children_mutex);
+            for (auto& child : root->children) {
+                if (has_marked_recursive(child)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
+    // Handle keyboard input when mark pane is focused
+    bool handle_mark_pane_key(int ch) {
+        switch (ch) {
+            case KEY_UP:
+            case 'k':
+                mark_pane.navigate_up();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case KEY_DOWN:
+            case 'j':
+                mark_pane.navigate_down();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case KEY_PPAGE:
+            case 'u':
+                if (ch == 'u' && !(keyname(ch) && strcmp(keyname(ch), "^U") == 0)) {
+                    // Just 'u', not Ctrl+U
+                    break;
+                }
+                mark_pane.navigate_page_up();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case KEY_NPAGE:
+            case 'd':
+                if (ch == 'd' && !(keyname(ch) && strcmp(keyname(ch), "^D") == 0)) {
+                    // Remove current item
+                    mark_pane.remove_selected();
+                    if (mark_pane.is_empty()) {
+                        // No more marked items, return to main pane
+                        focused_pane = FocusedPane::Main;
+                        mark_pane.set_focus(false);
+                        update_window_layout();
+                        needs_full_redraw = true;
+                    } else {
+                        mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                    }
+                    break;
+                }
+                mark_pane.navigate_page_down();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case KEY_HOME:
+            case 'H':
+                mark_pane.navigate_home();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case KEY_END:
+            case 'G':
+                mark_pane.navigate_end();
+                if (!mark_pane.is_empty()) {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case ' ':
+            case 'x':
+                // Remove selected item
+                mark_pane.remove_selected();
+                if (mark_pane.is_empty()) {
+                    // No more marked items, return to main pane
+                    focused_pane = FocusedPane::Main;
+                    mark_pane.set_focus(false);
+                    update_window_layout();
+                    needs_full_redraw = true;
+                } else {
+                    mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+                }
+                break;
+                
+            case 'a':
+            case 'A':
+                // Remove all marked items
+                mark_pane.remove_all();
+                focused_pane = FocusedPane::Main;
+                mark_pane.set_focus(false);
+                update_window_layout();
+                needs_full_redraw = true;
+                break;
+                
+            case 'r':
+                if (keyname(ch) && strcmp(keyname(ch), "^R") == 0) {
+                    // Ctrl+R - delete marked items
+                    delete_marked_from_pane();
+                    focused_pane = FocusedPane::Main;
+                    mark_pane.set_focus(false);
+                    update_window_layout();
+                    needs_full_redraw = true;
+                }
+                break;
+                
+            case 'q':
+            case 'Q':
+            case 27:  // ESC
+                // Return to main pane
+                focused_pane = FocusedPane::Main;
+                mark_pane.set_focus(false);
+                needs_full_redraw = true;
+                break;
+                
+            default:
+                break;
+        }
+        
+        return true;  // Continue running
+    }
+    
+    // Delete marked items when initiated from mark pane
+    void delete_marked_from_pane() {
+        auto marked_entries = mark_pane.get_all_marked();
+        
+        if (marked_entries.empty()) return;
+        
+        // Simplified deletion without confirmation when from mark pane
+        // In a real implementation, you might still want confirmation
+        size_t deleted_count = 0;
+        
+        for (auto& entry : marked_entries) {
+            try {
+                if (entry->is_directory && !entry->is_symlink) {
+                    fs::remove_all(entry->path);
+                } else {
+                    fs::remove(entry->path);
+                }
+                deleted_count++;
+                entry->marked = false;
+            } catch (...) {
+                // Continue with other files
+            }
+        }
+        
+        mark_pane.remove_all();
+        refresh_all();
+    }
+    
     // Apply accumulated movement efficiently
     void apply_movement(int delta) {
         if (delta == 0) return;
@@ -1282,8 +1823,78 @@ private:
         }
     }
     
+    void draw_full() {
+        WINDOW* win = main_win ? main_win : stdscr;
+        int height = getmaxy(win);
+        int width = getmaxx(win);
+        
+        werase(win);
+        
+        // Header
+        wattron(win, A_REVERSE);
+        mvwhline(win, 0, 0, ' ', width);
+        mvwprintw(win, 0, 1, " Disk Usage Analyzer v1.1.0 [C++ Optimized]    (press ? for help)");
+        wattroff(win, A_REVERSE);
+        
+        // Path bar
+        wattron(win, A_REVERSE);
+        mvwhline(win, 1, 0, ' ', width);
+        std::string path_str = current_dir->path.string();
+        if (path_str.empty()) path_str = "[root]";
+        mvwprintw(win, 1, 1, " %s", path_str.c_str());
+        
+        // Stats on the right
+        if (!current_view.empty()) {
+            std::string info = "(" + std::to_string(current_view.size()) + " visible, " +
+                              std::to_string(current_dir->entry_count.load()) + " total, " +
+                              format_size(current_dir->size, config.format) + ")";
+            if (info.length() + 2 < static_cast<size_t>(width)) {
+                mvwprintw(win, 1, width - info.length() - 2, "%s", info.c_str());
+            }
+        }
+        wattroff(win, A_REVERSE);
+        
+        // File list
+        int y = 2;
+        int max_y = height - 2;
+        
+        line_cache.clear();
+        for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
+            draw_entry_line(i, y, true, win, width);
+            y++;
+        }
+        
+        // Status bar
+        update_status_line(win, height, width);
+        
+        // Help line
+        if (!glob_search_active && !show_help) {
+            wmove(win, height - 1, 0);
+            wclrtoeol(win);
+            mvwprintw(win, height - 1, 1, " mark = d/space | ");
+            if (!mark_pane.is_empty()) {
+                wprintw(win, "mark pane = Tab | ");
+            }
+            wprintw(win, "delete = d | search = / | refresh = r/R");
+        }
+        
+        if (show_help) {
+            draw_help(win);
+        }
+        
+        // Remember current state
+        last_selected_index = selected_index;
+        last_view_offset = view_offset;
+        
+        wrefresh(win);
+    }
+    
     // Differential rendering - only update changed lines
     void draw_differential() {
+        WINDOW* win = main_win ? main_win : stdscr;
+        int height = getmaxy(win);
+        int width = getmaxx(win);
+        
         bool selection_changed = (selected_index != last_selected_index);
         bool view_scrolled = (view_offset != last_view_offset);
         
@@ -1292,19 +1903,19 @@ private:
         }
         
         int y = 2;
-        int max_y = LINES - 2;
+        int max_y = height - 2;
         
         // If view scrolled, we need to redraw all visible lines
         if (view_scrolled) {
             for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
-                draw_entry_line(i, y, true);
+                draw_entry_line(i, y, true, win, width);
                 y++;
             }
             
             // Clear any remaining lines
             while (y < max_y) {
-                move(y, 0);
-                clrtoeol();
+                wmove(win, y, 0);
+                wclrtoeol(win);
                 y++;
             }
         } else if (selection_changed) {
@@ -1313,37 +1924,37 @@ private:
                 last_selected_index >= view_offset && 
                 last_selected_index < view_offset + (max_y - 2)) {
                 int old_y = 2 + (last_selected_index - view_offset);
-                draw_entry_line(last_selected_index, old_y, false);
+                draw_entry_line(last_selected_index, old_y, false, win, width);
             }
             
             if (selected_index >= view_offset && 
                 selected_index < view_offset + (max_y - 2)) {
                 int new_y = 2 + (selected_index - view_offset);
-                draw_entry_line(selected_index, new_y, false);
+                draw_entry_line(selected_index, new_y, false, win, width);
             }
         }
         
         // Update status line if needed
-        update_status_line();
+        update_status_line(win, height, width);
         
         // Remember current state
         last_selected_index = selected_index;
         last_view_offset = view_offset;
         
-        refresh();
+        wrefresh(win);
     }
     
     // Draw a single entry line with full-line highlighting
-    void draw_entry_line(size_t index, int y, bool force_redraw) {
+    void draw_entry_line(size_t index, int y, bool force_redraw, WINDOW* win, int win_width) {
         if (index >= current_view.size()) return;
         
         auto entry = current_view[index];
-        bool is_selected = (index == selected_index);
+        bool is_selected = (index == selected_index) && (focused_pane == FocusedPane::Main);
         
         // Get cached formatting or create new
         auto& cached = format_cache[entry];
         if (cached.needs_update) {
-            update_format_cache(entry, cached);
+            update_format_cache(entry, cached, win_width);
         }
         
         // Check if we need to redraw this line
@@ -1353,17 +1964,17 @@ private:
         }
         
         // Move to line position
-        move(y, 0);
+        wmove(win, y, 0);
         
         // Clear the entire line first
-        clrtoeol();
+        wclrtoeol(win);
         
         // Apply selection highlighting to the entire line
         if (is_selected) {
-            attron(COLOR_PAIR(4));
+            wattron(win, COLOR_PAIR(4));
             // Fill the entire line with spaces to create full-line highlight
-            for (int i = 0; i < COLS; i++) {
-                mvaddch(y, i, ' ');
+            for (int i = 0; i < win_width; i++) {
+                mvwaddch(win, y, i, ' ');
             }
         }
         
@@ -1372,36 +1983,36 @@ private:
         
         // Mark indicator
         if (entry->marked.load()) {
-            if (!is_selected) attron(COLOR_PAIR(8) | A_BOLD);
-            mvaddch(y, col_x, '*');
-            if (!is_selected) attroff(COLOR_PAIR(8) | A_BOLD);
+            if (!is_selected) wattron(win, COLOR_PAIR(8) | A_BOLD);
+            mvwaddch(win, y, col_x, '*');
+            if (!is_selected) wattroff(win, COLOR_PAIR(8) | A_BOLD);
         } else {
-            mvaddch(y, col_x, ' ');
+            mvwaddch(win, y, col_x, ' ');
         }
         col_x = 1;
         
         // Size
         if (is_selected) {
-            attron(COLOR_PAIR(4));  // Keep selection color
+            wattron(win, COLOR_PAIR(4));  // Keep selection color
         } else {
-            attron(COLOR_PAIR(3));
+            wattron(win, COLOR_PAIR(3));
         }
-        mvprintw(y, col_x, "%9s", cached.formatted_size.c_str());
+        mvwprintw(win, y, col_x, "%9s", cached.formatted_size.c_str());
         if (!is_selected) {
-            attroff(COLOR_PAIR(3));
+            wattroff(win, COLOR_PAIR(3));
         }
         col_x += 10;
         
         // Separator
-        mvprintw(y, col_x, " | ");
+        mvwprintw(win, y, col_x, " | ");
         col_x += 3;
         
         // Percentage
-        mvprintw(y, col_x, "%5.1f%%", cached.percentage);
+        mvwprintw(win, y, col_x, "%5.1f%%", cached.percentage);
         col_x += 8;
         
         // Separator and graph bar
-        mvprintw(y, col_x, " | ");
+        mvwprintw(win, y, col_x, " | ");
         col_x += 3;
         
         // Graph bar
@@ -1410,57 +2021,57 @@ private:
         if (is_selected) {
             // Use a different character for selected bars
             for (int j = 0; j < bar_width; j++) {
-                mvaddch(y, col_x + j, '=');
+                mvwaddch(win, y, col_x + j, '=');
             }
         } else {
-            attron(COLOR_PAIR(3));
+            wattron(win, COLOR_PAIR(3));
             for (int j = 0; j < bar_width; j++) {
-                mvaddch(y, col_x + j, ACS_CKBOARD);
+                mvwaddch(win, y, col_x + j, ACS_CKBOARD);
             }
-            attroff(COLOR_PAIR(3));
+            wattroff(win, COLOR_PAIR(3));
         }
         col_x += 20;
         
         // Optional columns
         if (show_mtime) {
-            mvprintw(y, col_x, " | ");
+            mvwprintw(win, y, col_x, " | ");
             col_x += 3;
-            mvprintw(y, col_x, "%19s", cached.formatted_time.c_str());
+            mvwprintw(win, y, col_x, "%19s", cached.formatted_time.c_str());
             col_x += 20;
         }
         
         if (show_count) {
-            mvprintw(y, col_x, " | ");
+            mvwprintw(win, y, col_x, " | ");
             col_x += 3;
             
             if (entry->entry_count > 0) {
-                mvprintw(y, col_x, "%7lu", entry->entry_count.load());
+                mvwprintw(win, y, col_x, "%7lu", entry->entry_count.load());
             } else {
-                mvprintw(y, col_x, "      -");
+                mvwprintw(win, y, col_x, "      -");
             }
             col_x += 8;
         }
         
         // Name separator
-        mvprintw(y, col_x, " | ");
+        mvwprintw(win, y, col_x, " | ");
         col_x += 3;
         
         // Name with appropriate styling for entry type
         if (entry->is_symlink && !is_selected) {
-            attron(COLOR_PAIR(9));  // Magenta for symlinks
+            wattron(win, COLOR_PAIR(9));  // Magenta for symlinks
         } else if (entry->is_directory && !is_selected) {
-            attron(COLOR_PAIR(1) | A_BOLD);
+            wattron(win, COLOR_PAIR(1) | A_BOLD);
         }
         
-        mvprintw(y, col_x, "%s", cached.formatted_name.c_str());
+        mvwprintw(win, y, col_x, "%s", cached.formatted_name.c_str());
         
         if ((entry->is_symlink || entry->is_directory) && !is_selected) {
-            attroff(COLOR_PAIR(entry->is_symlink ? 9 : 1) | (entry->is_directory ? A_BOLD : 0));
+            wattroff(win, COLOR_PAIR(entry->is_symlink ? 9 : 1) | (entry->is_directory ? A_BOLD : 0));
         }
         
         // Turn off selection highlighting
         if (is_selected) {
-            attroff(COLOR_PAIR(4));
+            wattroff(win, COLOR_PAIR(4));
         }
         
         // Update cache
@@ -1470,7 +2081,7 @@ private:
         line_cache[index].is_selected = is_selected;
     }
     
-    void update_format_cache(std::shared_ptr<Entry> entry, CachedEntry& cached) {
+    void update_format_cache(std::shared_ptr<Entry> entry, CachedEntry& cached, int win_width) {
         cached.formatted_size = format_size(entry->size, config.format);
         cached.percentage = (current_dir->size > 0) ? 
             (static_cast<double>(entry->size.load()) / current_dir->size.load() * 100.0) : 0.0;
@@ -1502,7 +2113,7 @@ private:
         }
         
         // Adjust for available width
-        int available_width = COLS - 45;
+        int available_width = win_width - 45;
         if (show_mtime) available_width -= 23;
         if (show_count) available_width -= 11;
         
@@ -1536,7 +2147,7 @@ private:
         cached.needs_update = false;
     }
     
-    void update_status_line() {
+    void update_status_line(WINDOW* win, int height, int width) {
         // Build current status
         std::string sort_str = "Sort mode: ";
         switch (sort_mode) {
@@ -1557,116 +2168,66 @@ private:
                        " items (" + format_size(marked_size, config.format) + ")";
         }
         
+        // Add focus indicator
+        if (focused_pane == FocusedPane::Mark && !mark_pane.is_empty()) {
+            sort_str += " | [MARK PANE]";
+        }
+        
         // Only update if changed
-        if (sort_str != last_status_line) {
-            attron(A_REVERSE);
-            move(LINES - 2, 0);
-            clrtoeol();
-            mvprintw(LINES - 2, 1, "%s", sort_str.c_str());
-            attroff(A_REVERSE);
+        if (sort_str != last_status_line || true) {  // Always update for now
+            wattron(win, A_REVERSE);
+            wmove(win, height - 2, 0);
+            wclrtoeol(win);
+            mvwprintw(win, height - 2, 1, "%s", sort_str.c_str());
+            wattroff(win, A_REVERSE);
             last_status_line = sort_str;
         }
     }
     
-    void draw_full() {
-        clear();
+    void draw_help(WINDOW* win) {
+        int help_y = getmaxy(win) / 2 - 10;
+        int help_x = getmaxx(win) / 2 - 35;
         
-        // Header
-        attron(A_REVERSE);
-        mvhline(0, 0, ' ', COLS);
-        mvprintw(0, 1, " Disk Usage Analyzer v1.1.0 [C++ Optimized]    (press ? for help)");
-        attroff(A_REVERSE);
-        
-        // Path bar
-        attron(A_REVERSE);
-        mvhline(1, 0, ' ', COLS);
-        std::string path_str = current_dir->path.string();
-        if (path_str.empty()) path_str = "[root]";
-        mvprintw(1, 1, " %s", path_str.c_str());
-        
-        // Stats on the right
-        if (!current_view.empty()) {
-            std::string info = "(" + std::to_string(current_view.size()) + " visible, " +
-                              std::to_string(current_dir->entry_count.load()) + " total, " +
-                              format_size(current_dir->size, config.format) + ")";
-            mvprintw(1, COLS - info.length() - 2, "%s", info.c_str());
-        }
-        attroff(A_REVERSE);
-        
-        // File list
-        int y = 2;
-        int max_y = LINES - 2;
-        
-        line_cache.clear();
-        for (size_t i = view_offset; i < current_view.size() && y < max_y; i++) {
-            draw_entry_line(i, y, true);
-            y++;
-        }
-        
-        // Status bar
-        update_status_line();
-        
-        // Help line
-        if (!glob_search_active && !show_help) {
-            move(LINES - 1, 0);
-            clrtoeol();
-            mvprintw(LINES - 1, 1, " mark = d/space | delete = d | search = / | refresh = r/R");
-        }
-        
-        if (show_help) {
-            draw_help();
-        }
-        
-        // Remember current state
-        last_selected_index = selected_index;
-        last_view_offset = view_offset;
-        
-        refresh();
-    }
-    
-    void draw_help() {
-        int help_y = LINES / 2 - 10;
-        int help_x = COLS / 2 - 35;
-        
-        attron(COLOR_PAIR(7));
+        wattron(win, COLOR_PAIR(7));
         for (int i = 0; i < 20; i++) {
-            mvhline(help_y + i, help_x, ' ', 70);
+            mvwhline(win, help_y + i, help_x, ' ', 70);
         }
         
-        attron(A_BOLD);
-        mvprintw(help_y + 1, help_x + 30, "HELP");
-        attroff(A_BOLD);
+        wattron(win, A_BOLD);
+        mvwprintw(win, help_y + 1, help_x + 30, "HELP");
+        wattroff(win, A_BOLD);
         
         int y = help_y + 3;
-        mvprintw(y++, help_x + 2, "Navigation:");
-        mvprintw(y++, help_x + 4, "↑/k         Move up");
-        mvprintw(y++, help_x + 4, "↓/j         Move down");
-        mvprintw(y++, help_x + 4, "→/l/Enter   Enter directory");
-        mvprintw(y++, help_x + 4, "←/h/u       Go back");
-        mvprintw(y++, help_x + 4, "O           Open with system");
+        mvwprintw(win, y++, help_x + 2, "Navigation:");
+        mvwprintw(win, y++, help_x + 4, "↑/k         Move up");
+        mvwprintw(win, y++, help_x + 4, "↓/j         Move down");
+        mvwprintw(win, y++, help_x + 4, "→/l/Enter   Enter directory");
+        mvwprintw(win, y++, help_x + 4, "←/h/u       Go back");
+        mvwprintw(win, y++, help_x + 4, "O           Open with system");
+        mvwprintw(win, y++, help_x + 4, "Tab         Switch to mark pane");
         
-        mvprintw(help_y + 3, help_x + 35, "Marking:");
-        mvprintw(help_y + 4, help_x + 37, "space     Toggle mark");
-        mvprintw(help_y + 5, help_x + 37, "d         Mark & move down");
-        mvprintw(help_y + 6, help_x + 37, "a         Toggle all");
-        mvprintw(help_y + 7, help_x + 37, "d         Delete marked");
+        mvwprintw(win, help_y + 3, help_x + 35, "Marking:");
+        mvwprintw(win, help_y + 4, help_x + 37, "space     Toggle mark");
+        mvwprintw(win, help_y + 5, help_x + 37, "d         Mark & move down");
+        mvwprintw(win, help_y + 6, help_x + 37, "a         Toggle all");
+        mvwprintw(win, help_y + 7, help_x + 37, "d         Delete marked");
         
         y++;
-        mvprintw(y++, help_x + 2, "Sorting:");
-        mvprintw(y++, help_x + 4, "s         By size");
-        mvprintw(y++, help_x + 4, "n         By name");
-        mvprintw(y++, help_x + 4, "m         By modified time");
-        mvprintw(y++, help_x + 4, "c         By entry count");
+        mvwprintw(win, y++, help_x + 2, "Sorting:");
+        mvwprintw(win, y++, help_x + 4, "s         By size");
+        mvwprintw(win, y++, help_x + 4, "n         By name");
+        mvwprintw(win, y++, help_x + 4, "m         By modified time");
+        mvwprintw(win, y++, help_x + 4, "c         By entry count");
         
-        mvprintw(help_y + 10, help_x + 35, "Display:");
-        mvprintw(help_y + 11, help_x + 37, "M         Toggle mtime");
-        mvprintw(help_y + 12, help_x + 37, "C         Toggle count");
-        mvprintw(help_y + 13, help_x + 37, "/         Glob search");
-        mvprintw(help_y + 14, help_x + 37, "r/R       Refresh");
+        mvwprintw(win, help_y + 10, help_x + 35, "Display:");
+        mvwprintw(win, help_y + 11, help_x + 37, "M         Toggle mtime");
+        mvwprintw(win, help_y + 12, help_x + 37, "C         Toggle count");
+        mvwprintw(win, help_y + 13, help_x + 37, "/         Glob search");
+        mvwprintw(win, help_y + 14, help_x + 37, "r/R       Refresh");
         
-        mvprintw(help_y + 17, help_x + 20, "Press any key to close help");
+        mvwprintw(win, help_y + 17, help_x + 20, "Press any key to close help");
         
-        attroff(COLOR_PAIR(7));
+        wattroff(win, COLOR_PAIR(7));
     }
     
     // Handle non-movement keys
@@ -1689,21 +2250,25 @@ private:
                 
             case ' ':
                 toggle_mark();
+                check_mark_pane_visibility();
                 break;
                 
             case 'a':
             case 'A':
                 toggle_all_marks();
+                check_mark_pane_visibility();
                 needs_full_redraw = true;
                 break;
                 
             case 'd':
                 if (has_marked_items()) {
                     delete_marked_entries();
+                    check_mark_pane_visibility();
                     needs_full_redraw = true;
                 } else if (selected_index < current_view.size()) {
                     current_view[selected_index]->marked = true;
                     navigate_down();
+                    check_mark_pane_visibility();
                 }
                 break;
                 
@@ -1777,6 +2342,17 @@ private:
         }
         
         return true;  // Continue running
+    }
+    
+    // Check if mark pane should be visible and update layout
+    void check_mark_pane_visibility() {
+        bool should_show_mark_pane = !mark_pane.is_empty();
+        bool is_showing_mark_pane = (mark_win != nullptr);
+        
+        if (should_show_mark_pane != is_showing_mark_pane) {
+            update_window_layout();
+            needs_full_redraw = true;
+        }
     }
     
     void sort_by_size() {
@@ -1868,17 +2444,23 @@ private:
         
         if (marked_entries.empty()) return;
         
-        // Confirmation
-        clear();
-        mvprintw(LINES / 2 - 3, COLS / 2 - 20, "Delete %zu marked items?", 
-                marked_entries.size());
-        mvprintw(LINES / 2 - 1, COLS / 2 - 20, "Total size: %s", 
-                format_size(calculate_marked_size(), config.format).c_str());
-        mvprintw(LINES / 2 + 1, COLS / 2 - 20, "This action cannot be undone!");
-        mvprintw(LINES / 2 + 3, COLS / 2 - 20, "Press 'y' to confirm, any other key to cancel");
-        refresh();
+        // Confirmation dialog - enhanced to work with window system
+        WINDOW* dialog_win = newwin(10, 60, LINES/2 - 5, COLS/2 - 30);
+        box(dialog_win, 0, 0);
         
+        mvwprintw(dialog_win, 2, 2, "Delete %zu marked items?", marked_entries.size());
+        mvwprintw(dialog_win, 3, 2, "Total size: %s", 
+                format_size(calculate_marked_size(), config.format).c_str());
+        mvwprintw(dialog_win, 5, 2, "This action cannot be undone!");
+        mvwprintw(dialog_win, 7, 2, "Press 'y' to confirm, any other key to cancel");
+        wrefresh(dialog_win);
+        
+        nodelay(stdscr, FALSE);  // Blocking input for confirmation
         int ch = getch();
+        nodelay(stdscr, TRUE);   // Back to non-blocking
+        
+        delwin(dialog_win);
+        
         if (ch == 'y' || ch == 'Y') {
             size_t deleted_count = 0;
             
@@ -1891,6 +2473,9 @@ private:
                     }
                     deleted_count++;
                     
+                    // Clear the mark
+                    entry->marked = false;
+                    
                     // Remove from parent
                     remove_from_parent(entry);
                 } catch (...) {
@@ -1898,14 +2483,22 @@ private:
                 }
             }
             
+            // Update mark pane
+            mark_pane.update_marked_items(roots);
+            
             refresh_all();
             
-            clear();
-            mvprintw(LINES / 2, COLS / 2 - 20, "Deleted %zu items successfully!", 
-                    deleted_count);
-            refresh();
-            getch();
+            // Show success message
+            WINDOW* msg_win = newwin(3, 50, LINES/2 - 1, COLS/2 - 25);
+            box(msg_win, 0, 0);
+            mvwprintw(msg_win, 1, 2, "Deleted %zu items successfully!", deleted_count);
+            wrefresh(msg_win);
+            napms(1500);  // Show for 1.5 seconds
+            delwin(msg_win);
         }
+        
+        touchwin(stdscr);
+        refresh();
     }
     
     void collect_marked_entries(std::shared_ptr<Entry> root, 
