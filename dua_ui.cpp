@@ -1,5 +1,7 @@
 // dua_ui.cpp - UI functionality implementation
 #include "dua_ui.h"
+#include <ctime>
+#include <cstring>
 
 // LineCache implementation
 bool LineCache::operator!=(const LineCache& other) const {
@@ -650,6 +652,7 @@ void InteractiveUI::draw_differential() {
 }
 
 void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WINDOW* win, int win_width) {
+    (void)force_redraw; // Suppress unused parameter warning
     if (index >= current_view.size()) return;
     
     auto entry = current_view[index];
@@ -703,8 +706,6 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
     col_x += 3;
     mvwprintw(win, y, col_x, "%5.1f%%", cached.percentage);
     col_x += 8;
-    mvwprintw(win, y, col_x, " | ");
-    col_x += 3;
     
     // Graph bar
     int bar_width = static_cast<int>(cached.percentage / 100.0 * 20);
@@ -721,6 +722,62 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
         wattroff(win, COLOR_PAIR(3));
     }
     col_x += 20;
+    
+    // Modified time column (if enabled) - now after the bar
+    if (show_mtime) {
+        mvwprintw(win, y, col_x, " | ");
+        col_x += 3;
+        
+        if (is_selected) {
+            wattron(win, COLOR_PAIR(4));
+        } else {
+            wattron(win, COLOR_PAIR(2));
+        }
+        
+        // Format the time
+        // Convert file_time_type to time_t (C++17 compatible way)
+        auto file_time_epoch = entry->last_modified.time_since_epoch();
+        auto sys_time_epoch = std::chrono::duration_cast<std::chrono::system_clock::duration>(file_time_epoch);
+        auto sys_time = std::chrono::system_clock::time_point(sys_time_epoch);
+        auto time_t_val = std::chrono::system_clock::to_time_t(sys_time);
+        
+        std::tm* tm = std::localtime(&time_t_val);
+        char time_buffer[20];
+        if (tm) {
+            std::strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M", tm);
+        } else {
+            std::strcpy(time_buffer, "----/--/-- --:--");
+        }
+        
+        mvwprintw(win, y, col_x, "%16s", time_buffer);
+        if (!is_selected) {
+            wattroff(win, COLOR_PAIR(2));
+        }
+        col_x += 17;
+    }
+    
+    // Entry count column (if enabled)
+    if (show_count) {
+        mvwprintw(win, y, col_x, " | ");
+        col_x += 3;
+        
+        if (is_selected) {
+            wattron(win, COLOR_PAIR(4));
+        } else {
+            wattron(win, COLOR_PAIR(2));
+        }
+        
+        if (entry->entry_count.load() > 0) {
+            mvwprintw(win, y, col_x, "%6llu", (unsigned long long)entry->entry_count.load());
+        } else {
+            mvwprintw(win, y, col_x, "     -");
+        }
+        
+        if (!is_selected) {
+            wattroff(win, COLOR_PAIR(2));
+        }
+        col_x += 7;
+    }
     
     // Name
     mvwprintw(win, y, col_x, " | ");
@@ -759,8 +816,17 @@ void InteractiveUI::update_format_cache(std::shared_ptr<Entry> entry, CachedEntr
         cached.formatted_name = " " + name;
     }
     
-    // Truncate if too long
-    int available_width = win_width - 45;
+    // Calculate available width for name based on enabled columns
+    int used_width = 1 + 10 + 3 + 8 + 3 + 20;  // mark + size + sep + % + sep + bar
+    if (show_mtime) {
+        used_width += 3 + 17;  // separator + mtime
+    }
+    if (show_count) {
+        used_width += 3 + 7;  // separator + count
+    }
+    used_width += 3;  // final separator before name
+    
+    int available_width = win_width - used_width;
     if (cached.formatted_name.length() > static_cast<size_t>(available_width) && available_width > 3) {
         cached.formatted_name = "..." + 
             cached.formatted_name.substr(cached.formatted_name.length() - available_width + 3);
@@ -770,6 +836,7 @@ void InteractiveUI::update_format_cache(std::shared_ptr<Entry> entry, CachedEntr
 }
 
 void InteractiveUI::update_status_line(WINDOW* win, int height, int width) {
+    (void)width; // Suppress unused parameter warning
     std::string sort_str = "Sort mode: ";
     switch (sort_mode) {
         case SortMode::SIZE_DESC: sort_str += "size descending"; break;
@@ -1225,8 +1292,6 @@ void InteractiveUI::delete_marked_entries() {
     if (marked_entries.empty()) return;
     
     // Simplified deletion for now
-    size_t deleted_count = 0;
-    
     for (auto& entry : marked_entries) {
         try {
             if (entry->is_directory && !entry->is_symlink) {
@@ -1234,7 +1299,6 @@ void InteractiveUI::delete_marked_entries() {
             } else {
                 fs::remove(entry->path);
             }
-            deleted_count++;
             entry->marked = false;
         } catch (...) {
             // Continue with other files
@@ -1348,8 +1412,6 @@ void InteractiveUI::delete_marked_from_pane() {
     
     if (marked_entries.empty()) return;
     
-    size_t deleted_count = 0;
-    
     for (auto& entry : marked_entries) {
         try {
             if (entry->is_directory && !entry->is_symlink) {
@@ -1357,7 +1419,6 @@ void InteractiveUI::delete_marked_from_pane() {
             } else {
                 fs::remove(entry->path);
             }
-            deleted_count++;
             entry->marked = false;
         } catch (...) {
             // Continue with other files
