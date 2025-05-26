@@ -310,10 +310,7 @@ void InteractiveUI::run() {
     int pending_move = 0;
     
     while (running) {
-        if (!mark_pane.is_empty() || has_any_marked_items()) {
-            mark_pane.update_marked_items(roots);
-        }
-        
+        // Draw main window
         if (needs_full_redraw) {
             draw_full();
             needs_full_redraw = false;
@@ -321,6 +318,7 @@ void InteractiveUI::run() {
             draw_differential();
         }
         
+        // Draw mark pane if visible
         if (!mark_pane.is_empty()) {
             mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
         }
@@ -379,7 +377,7 @@ void InteractiveUI::run() {
                 apply_movement(pending_move);
                 pending_move = 0;
             }
-            napms(10);
+            napms(50);  // Increased from 10ms to 50ms for lower CPU usage
         }
     }
     
@@ -988,7 +986,7 @@ bool InteractiveUI::handle_key(int ch) {
                 needs_full_redraw = true;
             } else if (selected_index < current_view.size()) {
                 current_view[selected_index]->marked = true;
-                mark_pane.update_marked_items(roots);  // Update mark pane
+                mark_pane.update_marked_items(roots);  // Update immediately
                 navigate_down();
                 check_mark_pane_visibility();
             }
@@ -1203,7 +1201,7 @@ void InteractiveUI::toggle_mark() {
         auto entry = current_view[selected_index];
         entry->marked = !entry->marked.load();
         
-        // Update the mark pane with current marked items
+        // Update mark pane immediately to ensure check_mark_pane_visibility works
         mark_pane.update_marked_items(roots);
     }
 }
@@ -1214,7 +1212,7 @@ void InteractiveUI::toggle_all_marks() {
         entry->marked = !any_marked;
     }
     
-    // Update the mark pane with current marked items
+    // Update mark pane immediately
     mark_pane.update_marked_items(roots);
 }
 
