@@ -141,77 +141,27 @@ void MarkPane::draw(WINDOW* win, int height, int width) {
     box(win, 0, 0);
     
     // Title
-    std::string title = " Marked Items (" + std::to_string(marked_items.size()) + 
-                       " items, " + format_size(total_size(), config.format) + ") ";
+    std::string title = " Mark Pane ";
     mvwprintw(win, 0, (width - title.length()) / 2, "%s", title.c_str());
     
-    // Help text
+    // Draw tabs
+    draw_tabs(win, width);
+    
+    // Draw content based on current tab
+    if (tab_manager.get_current_tab() == MarkPaneTab::QUICKVIEW) {
+        draw_quickview(win, height, width);
+    } else {
+        draw_marked_files(win, height, width);
+    }
+    
+    // Help text at bottom
     if (has_focus) {
+        std::string help_text = (tab_manager.get_current_tab() == MarkPaneTab::QUICKVIEW) ?
+            " 1/2 = switch tabs | Tab = back " :
+            " 1/2 = tabs | x/d = remove | a = all ";
         wattron(win, A_BOLD);
-        mvwprintw(win, 0, width - 30, " x/d/space = remove | a = all ");
+        mvwprintw(win, height - 1, 2, "%s", help_text.c_str());
         wattroff(win, A_BOLD);
-    }
-    
-    int visible_height = height - 2;
-    int content_width = width - 2;
-    
-    // Draw items
-    for (int i = 0; i < visible_height && view_offset + i < marked_items.size(); i++) {
-        size_t item_idx = view_offset + i;
-        bool is_selected = has_focus && (item_idx == selected_index);
-        
-        wmove(win, i + 1, 1);
-        
-        if (is_selected) {
-            wattron(win, A_REVERSE);
-            for (int j = 0; j < content_width; j++) {
-                waddch(win, ' ');
-            }
-            wmove(win, i + 1, 1);
-        }
-        
-        std::string size_str = format_size(marked_sizes[item_idx], config.format);
-        int size_width = 12;
-        int separator_width = 3;
-        int path_width = content_width - size_width - separator_width;
-        
-        std::string path = marked_paths[item_idx];
-        if (path.length() > static_cast<size_t>(path_width)) {
-            path = "..." + path.substr(path.length() - path_width + 3);
-        }
-        
-        wattron(win, COLOR_PAIR(3));
-        mvwprintw(win, i + 1, 1, "%*s", size_width, size_str.c_str());
-        wattroff(win, COLOR_PAIR(3));
-        
-        wprintw(win, " | ");
-        
-        auto& item = marked_items[item_idx];
-        if (item->is_symlink) {
-            wattron(win, COLOR_PAIR(9));
-        } else if (item->is_directory) {
-            wattron(win, COLOR_PAIR(1) | A_BOLD);
-        }
-        
-        wprintw(win, "%s", path.c_str());
-        
-        if (item->is_symlink || item->is_directory) {
-            wattroff(win, COLOR_PAIR(item->is_symlink ? 9 : 1) | 
-                    (item->is_directory ? A_BOLD : 0));
-        }
-        
-        if (is_selected) {
-            wattroff(win, A_REVERSE);
-        }
-    }
-    
-    if (marked_items.size() > static_cast<size_t>(visible_height)) {
-        draw_scrollbar(win, height, view_offset, marked_items.size(), visible_height);
-    }
-    
-    if (has_focus) {
-        mvwhline(win, height - 1, 1, ACS_HLINE, width - 2);
-        mvwprintw(win, height - 1, 2, " Ctrl+r = delete | Ctrl+t = trash ");
     }
     
     wrefresh(win);
@@ -251,6 +201,155 @@ void MarkPane::draw_scrollbar(WINDOW* win, int height, size_t offset, size_t tot
         mvwaddch(win, i + 1, getmaxx(win) - 1, 
                  (i >= bar_pos && i < bar_pos + bar_size) ? ACS_CKBOARD : ACS_VLINE);
     }
+}
+
+// Tab and quickview support methods for MarkPane
+void MarkPane::switch_tab(int tab_number) {
+    tab_manager.switch_to_tab(tab_number);
+}
+
+void MarkPane::activate_quickview(const fs::path& path) {
+    tab_manager.activate_quickview(path);
+}
+
+void MarkPane::deactivate_quickview() {
+    tab_manager.deactivate_quickview();
+}
+
+bool MarkPane::is_quickview_active() const {
+    return tab_manager.is_quickview_active();
+}
+
+MarkPaneTab MarkPane::get_current_tab() const {
+    return tab_manager.get_current_tab();
+}
+
+void MarkPane::draw_tabs(WINDOW* win, int width) {
+    // Draw tab bar at the top
+    wattron(win, A_REVERSE);
+    mvwhline(win, 1, 1, ' ', width - 2);
+    
+    // Tab 1: Quick View
+    std::string tab1 = " 1:Quick View ";
+    if (tab_manager.get_current_tab() == MarkPaneTab::QUICKVIEW) {
+        wattroff(win, A_REVERSE);
+        wattron(win, A_BOLD);
+    }
+    mvwprintw(win, 1, 2, "%s", tab1.c_str());
+    if (tab_manager.get_current_tab() == MarkPaneTab::QUICKVIEW) {
+        wattroff(win, A_BOLD);
+        wattron(win, A_REVERSE);
+    }
+    
+    // Tab 2: Marked Files
+    std::string tab2 = " 2:Marked Files ";
+    if (tab_manager.get_current_tab() == MarkPaneTab::MARKED_FILES) {
+        wattroff(win, A_REVERSE);
+        wattron(win, A_BOLD);
+    }
+    mvwprintw(win, 1, 2 + tab1.length() + 1, "%s", tab2.c_str());
+    if (tab_manager.get_current_tab() == MarkPaneTab::MARKED_FILES) {
+        wattroff(win, A_BOLD);
+    } else {
+        wattroff(win, A_REVERSE);
+    }
+}
+
+void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
+    if (!tab_manager.is_quickview_active()) {
+        mvwprintw(win, height / 2, (width - 20) / 2, "No file selected");
+        mvwprintw(win, height / 2 + 1, (width - 30) / 2, "Press 'i' on a file to preview");
+        return;
+    }
+    
+    const PreviewContent& preview = tab_manager.get_cached_preview();
+    auto formatted = QuickView::format_preview(preview, width - 2, height - 4);
+    
+    int y = 3;
+    for (const auto& line : formatted) {
+        if (y >= height - 1) break;
+        mvwprintw(win, y++, 2, "%s", line.c_str());
+    }
+}
+
+void MarkPane::draw_marked_files(WINDOW* win, int height, int width) {
+    if (marked_items.empty()) {
+        mvwprintw(win, height / 2, (width - 20) / 2, "No marked items");
+        return;
+    }
+    
+    // Draw items (leave space for header, tabs, bottom info, and border)
+    int visible_items = height - 5;
+    int y = 3;
+    
+    for (size_t i = view_offset; i < marked_items.size() && y < height - 2; i++) {
+        bool is_selected = (has_focus && i == selected_index);
+        
+        if (is_selected) {
+            wattron(win, A_REVERSE);
+        }
+        
+        // Clear line
+        mvwhline(win, y, 1, ' ', width - 2);
+        
+        // Format entry
+        std::string size_str = format_size(marked_sizes[i], config.format);
+        std::string path_str = marked_paths[i];
+        
+        // Fixed column widths
+        const int size_col_width = 10;   // Fixed width for size column
+        const int separator_width = 3;   // " | "
+        const int path_start = 2 + size_col_width + separator_width;
+        
+        // Truncate path if too long
+        int max_path_len = width - path_start - 2;
+        if (path_str.length() > max_path_len) {
+            path_str = "..." + path_str.substr(path_str.length() - max_path_len + 3);
+        }
+        
+        // Draw with colors
+        auto& item = marked_items[i];
+        
+        // Size in green (right-aligned in fixed width column)
+        wattron(win, COLOR_PAIR(3));
+        mvwprintw(win, y, 2, "%*s", size_col_width, size_str.c_str());
+        wattroff(win, COLOR_PAIR(3));
+        
+        // Separator at fixed position
+        mvwprintw(win, y, 2 + size_col_width, " | ");
+        
+        // Path with appropriate color at fixed position
+        wmove(win, y, path_start);
+        if (item->is_symlink) {
+            wattron(win, COLOR_PAIR(9));  // Magenta for symlinks
+        } else if (item->is_directory) {
+            wattron(win, COLOR_PAIR(1) | A_BOLD);  // Cyan bold for directories
+        }
+        
+        wprintw(win, "%s", path_str.c_str());
+        
+        if (item->is_symlink || item->is_directory) {
+            wattroff(win, COLOR_PAIR(item->is_symlink ? 9 : 1) | 
+                    (item->is_directory ? A_BOLD : 0));
+        }
+        
+        if (is_selected) {
+            wattroff(win, A_REVERSE);
+        }
+        
+        y++;
+    }
+    
+    // Draw scrollbar if needed
+    if (marked_items.size() > visible_items) {
+        draw_scrollbar(win, height, view_offset, marked_items.size(), visible_items);
+    }
+    
+    // Draw total information at bottom
+    mvwhline(win, height - 2, 1, ACS_HLINE, width - 2);
+    std::string total_info = "Total: " + std::to_string(marked_items.size()) + 
+                            " items, " + format_size(total_size(), config.format);
+    mvwprintw(win, height - 2, (width - total_info.length()) / 2, " %s ", total_info.c_str());
 }
 
 // InteractiveUI implementation
@@ -319,7 +418,7 @@ void InteractiveUI::run() {
         }
         
         // Draw mark pane if visible
-        if (!mark_pane.is_empty()) {
+        if (mark_win && (!mark_pane.is_empty() || mark_pane.is_quickview_active())) {
             mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
         }
         
@@ -334,7 +433,7 @@ void InteractiveUI::run() {
             auto now = std::chrono::steady_clock::now();
             bool is_movement = (ch == KEY_UP || ch == KEY_DOWN || ch == 'j' || ch == 'k');
             
-            if (ch == '\t' && !mark_pane.is_empty()) {
+            if (ch == '\t' && (!mark_pane.is_empty() || mark_pane.is_quickview_active())) {
                 switch_focus();
                 needs_full_redraw = true;
                 continue;
@@ -399,7 +498,7 @@ void InteractiveUI::update_window_layout() {
     clear();
     refresh();
     
-    if (!mark_pane.is_empty()) {
+    if (!mark_pane.is_empty() || mark_pane.is_quickview_active()) {
         int width = COLS;
         int height = LINES;
         int split_pos = width * 2 / 3;
@@ -891,6 +990,8 @@ void InteractiveUI::draw_help(WINDOW* win) {
     mvwprintw(win, y++, left_col + 20, "Go back");
     mvwprintw(win, y, left_col + 2, "O");
     mvwprintw(win, y++, left_col + 20, "Open with system");
+    mvwprintw(win, y, left_col + 2, "i");
+    mvwprintw(win, y++, left_col + 20, "Quick view file");
     mvwprintw(win, y, left_col + 2, "Tab");
     mvwprintw(win, y++, left_col + 20, "Switch to mark pane");
     
@@ -987,6 +1088,7 @@ bool InteractiveUI::handle_key(int ch) {
             } else if (selected_index < current_view.size()) {
                 current_view[selected_index]->marked = true;
                 mark_pane.update_marked_items(roots);  // Update immediately
+                mark_pane.switch_tab(2);  // Switch to marked files tab
                 navigate_down();
                 check_mark_pane_visibility();
             }
@@ -994,6 +1096,16 @@ bool InteractiveUI::handle_key(int ch) {
             
         case 'O':  // Open with system
             open_selected();
+            break;
+            
+        case 'i':  // Quick view
+            if (selected_index < current_view.size()) {
+                auto entry = current_view[selected_index];
+                mark_pane.activate_quickview(entry->path);
+                mark_pane.switch_tab(1);  // Switch to quickview tab
+                check_mark_pane_visibility();  // Always check visibility
+                needs_full_redraw = true;
+            }
             break;
             
         case '/':  // Glob search
@@ -1061,6 +1173,16 @@ bool InteractiveUI::handle_key(int ch) {
 
 bool InteractiveUI::handle_mark_pane_key(int ch) {
     switch (ch) {
+        case '1':  // Switch to quickview tab
+            mark_pane.switch_tab(1);
+            mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+            break;
+            
+        case '2':  // Switch to marked files tab
+            mark_pane.switch_tab(2);
+            mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+            break;
+            
         case KEY_UP:
         case 'k':
             mark_pane.navigate_up();
@@ -1205,6 +1327,11 @@ void InteractiveUI::toggle_mark() {
         
         // Update mark pane immediately to ensure check_mark_pane_visibility works
         mark_pane.update_marked_items(roots);
+        
+        // Switch to marked files tab when marking state changes
+        if (!mark_pane.is_empty()) {
+            mark_pane.switch_tab(2);  // Switch to marked files tab
+        }
     }
 }
 
@@ -1216,6 +1343,11 @@ void InteractiveUI::toggle_all_marks() {
     
     // Update mark pane immediately
     mark_pane.update_marked_items(roots);
+    
+    // Switch to marked files tab when marking state changes
+    if (!mark_pane.is_empty()) {
+        mark_pane.switch_tab(2);  // Switch to marked files tab
+    }
 }
 
 bool InteractiveUI::has_marked_items() {
@@ -1228,7 +1360,7 @@ bool InteractiveUI::has_marked_items() {
 }
 
 void InteractiveUI::check_mark_pane_visibility() {
-    bool should_show_mark_pane = !mark_pane.is_empty();
+    bool should_show_mark_pane = !mark_pane.is_empty() || mark_pane.is_quickview_active();
     bool is_showing_mark_pane = (mark_win != nullptr);
     
     if (should_show_mark_pane != is_showing_mark_pane) {

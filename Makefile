@@ -125,7 +125,7 @@ LDFLAGS = $(LDFLAGS_PLATFORM) $(LDFLAGS_STATIC) $(LDFLAGS_LTO)
 
 # Source files - IMPORTANT: These are your precious source files!
 # The Makefile will NEVER delete these
-SOURCES = dua_enhanced.cpp dua_core.cpp dua_ui.cpp
+SOURCES = dua_enhanced.cpp dua_core.cpp dua_ui.cpp dua_quickview.cpp
 
 # Object files - These are temporary build products that can be safely deleted
 OBJECTS = $(SOURCES:.cpp=.o)

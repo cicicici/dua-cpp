@@ -3,6 +3,7 @@
 #define DUA_UI_H
 
 #include "dua_core.h"
+#include "dua_quickview.h"
 #include <ncurses.h>
 
 // Forward declarations
@@ -45,7 +46,7 @@ struct CachedEntry {
     bool needs_update = true;
 };
 
-// Mark Pane - provides a focused view of all marked items
+// Mark Pane - provides a focused view of all marked items with tab support
 class MarkPane {
 private:
     std::vector<std::shared_ptr<Entry>> marked_items;
@@ -56,9 +57,16 @@ private:
     bool has_focus = false;
     Config& config;
     
+    // Tab support
+    TabManager tab_manager;
+    PreviewContent current_preview;
+    
     void collect_marked_recursive(std::shared_ptr<Entry> entry);
     void adjust_view_offset();
     void draw_scrollbar(WINDOW* win, int height, size_t offset, size_t total, int visible);
+    void draw_tabs(WINDOW* win, int width);
+    void draw_quickview(WINDOW* win, int height, int width);
+    void draw_marked_files(WINDOW* win, int height, int width);
     
 public:
     MarkPane(Config& cfg);
@@ -80,6 +88,13 @@ public:
     void remove_all();
     std::vector<std::shared_ptr<Entry>> get_all_marked() const;
     void draw(WINDOW* win, int height, int width);
+    
+    // Tab and quickview support
+    void switch_tab(int tab_number);
+    void activate_quickview(const fs::path& path);
+    void deactivate_quickview();
+    bool is_quickview_active() const;
+    MarkPaneTab get_current_tab() const;
 };
 
 // Interactive UI class
