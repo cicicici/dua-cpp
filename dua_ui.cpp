@@ -998,7 +998,7 @@ bool InteractiveUI::handle_key(int ch) {
             
         case '/':  // Glob search
             start_glob_search();
-            needs_full_redraw = true;
+            // Don't trigger full redraw - we want to keep the search prompt visible
             break;
             
         case 'r':  // Refresh selected
@@ -1116,19 +1116,15 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
 }
 
 void InteractiveUI::handle_glob_search(int ch) {
-    // Show search prompt
-    move(LINES - 1, 0);
-    clrtoeol();
-    mvprintw(LINES - 1, 0, "Search: %s", glob_pattern.c_str());
-    refresh();
-    
     if (ch == 27) {  // ESC
         glob_search_active = false;
         needs_full_redraw = true;
+        return;
     } else if (ch == '\n') {
         perform_glob_search();
         glob_search_active = false;
         needs_full_redraw = true;
+        return;
     } else if (ch == KEY_BACKSPACE || ch == 127) {
         if (!glob_pattern.empty()) {
             glob_pattern.pop_back();
@@ -1136,6 +1132,12 @@ void InteractiveUI::handle_glob_search(int ch) {
     } else if (ch >= 32 && ch < 127) {
         glob_pattern += static_cast<char>(ch);
     }
+    
+    // Show search prompt with updated pattern
+    move(LINES - 1, 0);
+    clrtoeol();
+    mvprintw(LINES - 1, 0, "Search: %s", glob_pattern.c_str());
+    refresh();
 }
 
 bool InteractiveUI::has_any_marked_items() {
@@ -1238,6 +1240,12 @@ void InteractiveUI::check_mark_pane_visibility() {
 void InteractiveUI::start_glob_search() {
     glob_search_active = true;
     glob_pattern.clear();
+    
+    // Show search prompt immediately
+    move(LINES - 1, 0);
+    clrtoeol();
+    mvprintw(LINES - 1, 0, "Search: ");
+    refresh();
 }
 
 void InteractiveUI::perform_glob_search() {
