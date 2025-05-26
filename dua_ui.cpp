@@ -545,7 +545,7 @@ void InteractiveUI::draw_full() {
     // Header
     wattron(win, A_REVERSE);
     mvwhline(win, 0, 0, ' ', width);
-    mvwprintw(win, 0, 1, " Disk Usage Analyzer v1.2.0 [C++ Optimized]    (press ? for help)");
+    mvwprintw(win, 0, 1, " Disk Usage Analyzer v%s [C++ Optimized]    (press ? for help)", DUA_VERSION);
     wattroff(win, A_REVERSE);
     
     // Path bar
