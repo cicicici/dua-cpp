@@ -1291,7 +1291,39 @@ void InteractiveUI::delete_marked_entries() {
     
     if (marked_entries.empty()) return;
     
-    // Simplified deletion for now
+    // Create confirmation dialog
+    int dialog_height = 8;
+    int dialog_width = 60;
+    int dialog_y = (LINES - dialog_height) / 2;
+    int dialog_x = (COLS - dialog_width) / 2;
+    
+    WINDOW* dialog = newwin(dialog_height, dialog_width, dialog_y, dialog_x);
+    box(dialog, 0, 0);
+    
+    // Display warning message
+    mvwprintw(dialog, 1, 2, "WARNING: About to delete %zu item(s)", marked_entries.size());
+    mvwprintw(dialog, 2, 2, "This action cannot be undone!");
+    mvwprintw(dialog, 4, 2, "Type YES and press Enter to confirm deletion:");
+    mvwprintw(dialog, 5, 2, ">");
+    
+    wrefresh(dialog);
+    
+    // Get user confirmation
+    echo();
+    char confirmation[10];
+    mvwgetnstr(dialog, 5, 4, confirmation, 9);
+    noecho();
+    
+    delwin(dialog);
+    touchwin(stdscr);
+    refresh();
+    
+    // Check if user typed "YES"
+    if (std::string(confirmation) != "YES") {
+        return;  // User didn't confirm, abort deletion
+    }
+    
+    // Proceed with deletion
     for (auto& entry : marked_entries) {
         try {
             if (entry->is_directory && !entry->is_symlink) {
