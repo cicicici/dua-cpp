@@ -101,6 +101,7 @@ struct ScrollableView {
     void next_match();
     void prev_match();
     void move_to_match(size_t match_index);
+    void update_current_match_index();
     bool has_matches() const { return !search_matches.empty(); }
     size_t get_match_count() const { return search_matches.size(); }
     size_t get_current_match_index() const { return current_match_index; }

@@ -252,18 +252,48 @@ void ScrollableView::perform_search(const std::vector<std::string>& lines) {
 void ScrollableView::next_match() {
     if (search_matches.empty()) return;
     
-    current_match_index = (current_match_index + 1) % search_matches.size();
+    // Find the first match after current cursor position
+    size_t best_match = 0;
+    bool found_after = false;
+    
+    for (size_t i = 0; i < search_matches.size(); i++) {
+        const SearchMatch& match = search_matches[i];
+        
+        // Check if this match is after current cursor position
+        if (match.line > cursor_y || (match.line == cursor_y && match.column > cursor_x)) {
+            best_match = i;
+            found_after = true;
+            break;
+        }
+    }
+    
+    // If no match after cursor, wrap to first match
+    if (!found_after && !search_matches.empty()) {
+        best_match = 0;
+    }
+    
+    current_match_index = best_match;
     move_to_match(current_match_index);
 }
 
 void ScrollableView::prev_match() {
     if (search_matches.empty()) return;
     
-    if (current_match_index == 0) {
-        current_match_index = search_matches.size() - 1;
-    } else {
-        current_match_index--;
+    // Find the last match before current cursor position
+    size_t best_match = search_matches.size() - 1;  // Default to last match (for wrapping)
+    
+    // Search backwards through matches
+    for (int i = search_matches.size() - 1; i >= 0; i--) {
+        const SearchMatch& match = search_matches[i];
+        
+        // Check if this match is before current cursor position
+        if (match.line < cursor_y || (match.line == cursor_y && match.column < cursor_x)) {
+            best_match = i;
+            break;
+        }
     }
+    
+    current_match_index = best_match;
     move_to_match(current_match_index);
 }
 
@@ -273,6 +303,9 @@ void ScrollableView::move_to_match(size_t match_index) {
     const SearchMatch& match = search_matches[match_index];
     cursor_y = match.line;
     cursor_x = match.column;
+    
+    // Update current match index for display
+    current_match_index = match_index;
     
     // Center the match in the view if possible
     if (window_height > 0) {
@@ -291,6 +324,35 @@ void ScrollableView::move_to_match(size_t match_index) {
     } else if (cursor_x >= view_offset_x + window_width) {
         view_offset_x = cursor_x > window_width ? cursor_x - window_width / 2 : 0;
     }
+}
+
+void ScrollableView::update_current_match_index() {
+    if (search_matches.empty()) {
+        current_match_index = 0;
+        return;
+    }
+    
+    // Find which match the cursor is at or closest to
+    for (size_t i = 0; i < search_matches.size(); i++) {
+        const SearchMatch& match = search_matches[i];
+        if (match.line == cursor_y && match.column == cursor_x) {
+            current_match_index = i;
+            return;
+        }
+    }
+    
+    // If not on a match, find the next match position for reference
+    for (size_t i = 0; i < search_matches.size(); i++) {
+        const SearchMatch& match = search_matches[i];
+        if (match.line > cursor_y || (match.line == cursor_y && match.column > cursor_x)) {
+            // We're before this match, so the "current" is the previous one
+            current_match_index = (i > 0) ? i - 1 : search_matches.size() - 1;
+            return;
+        }
+    }
+    
+    // Cursor is after all matches
+    current_match_index = search_matches.size() - 1;
 }
 
 // Command mode implementation
@@ -361,6 +423,11 @@ void ScrollableView::goto_line(size_t line_number) {
     
     // Reset horizontal scroll
     view_offset_x = 0;
+    
+    // Update match index for display
+    if (!search_matches.empty()) {
+        update_current_match_index();
+    }
 }
 
 // Helper to format file size

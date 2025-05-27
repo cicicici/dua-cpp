@@ -1410,49 +1410,79 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
             case KEY_UP:
             case 'k':
                 scroll_view.move_up();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_DOWN:
             case 'j':
                 scroll_view.move_down();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_LEFT:
             case 'h':
                 scroll_view.move_left();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_RIGHT:
             case 'l':
                 scroll_view.move_right();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_PPAGE:  // Page Up
             case 'b':
                 scroll_view.page_up();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_NPAGE:  // Page Down
             case 'f':
                 scroll_view.page_down();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_HOME:
             case 'g':
                 scroll_view.move_home();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case KEY_END:
             case 'G':
                 scroll_view.move_end();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case '0':
                 scroll_view.move_line_start();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case '$':
                 scroll_view.move_line_end();
+                if (scroll_view.has_matches()) {
+                    scroll_view.update_current_match_index();
+                }
                 break;
                 
             case '/':  // Start search
