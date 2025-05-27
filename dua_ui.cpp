@@ -401,6 +401,7 @@ void InteractiveUI::run() {
         init_pair(7, COLOR_BLUE, COLOR_BLACK);
         init_pair(8, COLOR_RED, COLOR_BLACK);
         init_pair(9, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(10, COLOR_BLACK, COLOR_BLUE);  // Unfocused selection
     }
     
     update_window_layout();
@@ -453,12 +454,22 @@ void InteractiveUI::run() {
                 if (pending_move != 0) {
                     apply_movement(pending_move);
                     pending_move = 0;
+                    
+                    // Update preview after batched movement
+                    if (mark_pane.is_quickview_active() && selected_index < current_view.size()) {
+                        mark_pane.activate_quickview(current_view[selected_index]->path);
+                    }
                 }
                 
                 if (ch == KEY_UP || ch == 'k') {
                     navigate_up();
                 } else {
                     navigate_down();
+                }
+                
+                // Update preview if quickview is active
+                if (mark_pane.is_quickview_active() && selected_index < current_view.size()) {
+                    mark_pane.activate_quickview(current_view[selected_index]->path);
                 }
                 
                 last_input_time = now;
@@ -475,6 +486,11 @@ void InteractiveUI::run() {
             if (pending_move != 0) {
                 apply_movement(pending_move);
                 pending_move = 0;
+                
+                // Update preview after batched movement
+                if (mark_pane.is_quickview_active() && selected_index < current_view.size()) {
+                    mark_pane.activate_quickview(current_view[selected_index]->path);
+                }
             }
             napms(50);  // Increased from 10ms to 50ms for lower CPU usage
         }
@@ -759,7 +775,8 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
     if (index >= current_view.size()) return;
     
     auto entry = current_view[index];
-    bool is_selected = (index == selected_index) && (focused_pane == FocusedPane::Main);
+    bool is_selected = (index == selected_index);
+    bool has_focus = (focused_pane == FocusedPane::Main);
     
     // Get cached formatting or create new
     auto& cached = format_cache[entry];
@@ -773,7 +790,11 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
     
     // Apply selection highlighting
     if (is_selected) {
-        wattron(win, COLOR_PAIR(4));
+        if (has_focus) {
+            wattron(win, COLOR_PAIR(4));  // Cyan background when focused
+        } else {
+            wattron(win, COLOR_PAIR(10));  // Blue background when not focused
+        }
         for (int i = 0; i < win_width; i++) {
             mvwaddch(win, y, i, ' ');
         }
@@ -794,7 +815,11 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
     
     // Size
     if (is_selected) {
-        wattron(win, COLOR_PAIR(4));
+        if (has_focus) {
+            wattron(win, COLOR_PAIR(4));
+        } else {
+            wattron(win, COLOR_PAIR(10));
+        }
     } else {
         wattron(win, COLOR_PAIR(3));
     }
@@ -832,7 +857,11 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
         col_x += 3;
         
         if (is_selected) {
-            wattron(win, COLOR_PAIR(4));
+            if (has_focus) {
+                wattron(win, COLOR_PAIR(4));
+            } else {
+                wattron(win, COLOR_PAIR(10));
+            }
         } else {
             wattron(win, COLOR_PAIR(2));
         }
@@ -865,7 +894,11 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
         col_x += 3;
         
         if (is_selected) {
-            wattron(win, COLOR_PAIR(4));
+            if (has_focus) {
+                wattron(win, COLOR_PAIR(4));
+            } else {
+                wattron(win, COLOR_PAIR(10));
+            }
         } else {
             wattron(win, COLOR_PAIR(2));
         }
@@ -899,7 +932,11 @@ void InteractiveUI::draw_entry_line(size_t index, int y, bool force_redraw, WIND
     }
     
     if (is_selected) {
-        wattroff(win, COLOR_PAIR(4));
+        if (has_focus) {
+            wattroff(win, COLOR_PAIR(4));
+        } else {
+            wattroff(win, COLOR_PAIR(10));
+        }
     }
 }
 
@@ -992,6 +1029,8 @@ void InteractiveUI::draw_help(WINDOW* win) {
     mvwprintw(win, y++, left_col + 20, "Open with system");
     mvwprintw(win, y, left_col + 2, "i");
     mvwprintw(win, y++, left_col + 20, "Quick view file");
+    mvwprintw(win, y, left_col + 2, "I");
+    mvwprintw(win, y++, left_col + 20, "Clear preview");
     mvwprintw(win, y, left_col + 2, "Tab");
     mvwprintw(win, y++, left_col + 20, "Switch to mark pane");
     
@@ -1104,6 +1143,19 @@ bool InteractiveUI::handle_key(int ch) {
                 mark_pane.activate_quickview(entry->path);
                 mark_pane.switch_tab(1);  // Switch to quickview tab
                 check_mark_pane_visibility();  // Always check visibility
+                needs_full_redraw = true;
+            }
+            break;
+            
+        case 'I':  // Clear preview
+            mark_pane.deactivate_quickview();
+            if (mark_pane.is_empty()) {
+                // No marked files, close mark pane
+                check_mark_pane_visibility();
+                needs_full_redraw = true;
+            } else {
+                // Has marked files, switch to marked files tab
+                mark_pane.switch_tab(2);
                 needs_full_redraw = true;
             }
             break;
