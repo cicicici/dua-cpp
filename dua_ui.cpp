@@ -1501,6 +1501,10 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
                 scroll_view.prev_match();
                 break;
                 
+            case '*':  // Search word under cursor
+                scroll_view.search_word_under_cursor(preview.lines);
+                break;
+                
             case '1':  // Switch to quickview tab
             case '2':  // Switch to marked files tab
                 // Fall through to regular tab switching

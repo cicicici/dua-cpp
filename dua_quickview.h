@@ -98,6 +98,7 @@ struct ScrollableView {
     void start_search();
     void end_search();
     void perform_search(const std::vector<std::string>& lines);
+    void search_word_under_cursor(const std::vector<std::string>& lines);
     void next_match();
     void prev_match();
     void move_to_match(size_t match_index);

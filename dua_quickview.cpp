@@ -249,6 +249,48 @@ void ScrollableView::perform_search(const std::vector<std::string>& lines) {
     }
 }
 
+void ScrollableView::search_word_under_cursor(const std::vector<std::string>& lines) {
+    // Get the current line
+    if (cursor_y >= lines.size()) return;
+    
+    const std::string& line = lines[cursor_y];
+    if (cursor_x >= line.length()) return;
+    
+    // Find word boundaries
+    size_t word_start = cursor_x;
+    size_t word_end = cursor_x;
+    
+    // Define what constitutes a word character (alphanumeric and underscore)
+    auto is_word_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    
+    // If not on a word character, do nothing
+    if (!is_word_char(line[cursor_x])) {
+        return;
+    }
+    
+    // Find start of word
+    while (word_start > 0 && is_word_char(line[word_start - 1])) {
+        word_start--;
+    }
+    
+    // Find end of word
+    while (word_end < line.length() && is_word_char(line[word_end])) {
+        word_end++;
+    }
+    
+    // Extract the word
+    if (word_start < word_end) {
+        search_pattern = line.substr(word_start, word_end - word_start);
+        search_active = false;  // Not in search input mode
+        perform_search(lines);
+        
+        // Move to next match after current position
+        next_match();
+    }
+}
+
 void ScrollableView::next_match() {
     if (search_matches.empty()) return;
     
