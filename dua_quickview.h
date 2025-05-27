@@ -53,6 +53,16 @@ struct ScrollableView {
     // Store line lengths for proper cursor movement
     std::vector<size_t> line_lengths;
     
+    // Search functionality
+    struct SearchMatch {
+        size_t line;
+        size_t column;
+    };
+    std::vector<SearchMatch> search_matches;
+    std::string search_pattern;
+    size_t current_match_index = 0;
+    bool search_active = false;
+    
     // Navigation methods
     void move_up();
     void move_down();
@@ -79,6 +89,17 @@ struct ScrollableView {
     
     // Reset state
     void reset();
+    
+    // Search methods
+    void start_search();
+    void end_search();
+    void perform_search(const std::vector<std::string>& lines);
+    void next_match();
+    void prev_match();
+    void move_to_match(size_t match_index);
+    bool has_matches() const { return !search_matches.empty(); }
+    size_t get_match_count() const { return search_matches.size(); }
+    size_t get_current_match_index() const { return current_match_index; }
 };
 
 class QuickView {

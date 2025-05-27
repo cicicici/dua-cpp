@@ -291,11 +291,30 @@ void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
             
             // Always draw character by character to preserve spaces
             for (size_t col = 0; col < visible_part.length() && col < static_cast<size_t>(content_width); col++) {
-                // Highlight cursor position if on this line and focused
-                if (has_focus && line_idx == scroll_view.cursor_y && start_x + col == scroll_view.cursor_x) {
+                bool is_cursor = has_focus && line_idx == scroll_view.cursor_y && start_x + col == scroll_view.cursor_x;
+                bool is_match = false;
+                
+                // Check if this position is part of a search match
+                if (!scroll_view.search_pattern.empty()) {
+                    for (const auto& match : scroll_view.search_matches) {
+                        if (match.line == line_idx && 
+                            start_x + col >= match.column && 
+                            start_x + col < match.column + scroll_view.search_pattern.length()) {
+                            is_match = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Apply highlighting
+                if (is_cursor) {
                     wattron(win, A_REVERSE);
                     mvwaddch(win, draw_y, 2 + col, visible_part[col]);
                     wattroff(win, A_REVERSE);
+                } else if (is_match) {
+                    wattron(win, COLOR_PAIR(6) | A_BOLD);  // Yellow bold for matches
+                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                    wattroff(win, COLOR_PAIR(6) | A_BOLD);
                 } else {
                     mvwaddch(win, draw_y, 2 + col, visible_part[col]);
                 }
@@ -332,11 +351,20 @@ void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
         }
     }
     
-    // Show cursor position in status line
+    // Show cursor position and search info in status line
     if (has_focus) {
         std::string cursor_info = "Line " + std::to_string(scroll_view.cursor_y + 1) + "/" + 
                                  std::to_string(preview.lines.size()) + 
                                  " Col " + std::to_string(scroll_view.cursor_x + 1);
+        
+        // Add search info
+        if (scroll_view.search_active) {
+            cursor_info += " Search: " + scroll_view.search_pattern + "_";
+        } else if (scroll_view.has_matches()) {
+            cursor_info += " [" + std::to_string(scroll_view.get_current_match_index() + 1) + 
+                          "/" + std::to_string(scroll_view.get_match_count()) + "]";
+        }
+        
         mvwprintw(win, height - 2, 2, "%s", cursor_info.c_str());
     }
 }
@@ -1314,7 +1342,35 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
     // Check if we're in quickview mode and handle navigation differently
     if (mark_pane.get_current_tab() == MarkPaneTab::QUICKVIEW && mark_pane.is_quickview_active()) {
         ScrollableView& scroll_view = mark_pane.get_tab_manager().get_scroll_view();
+        const PreviewContent& preview = mark_pane.get_tab_manager().get_cached_preview();
         bool needs_redraw = true;
+        
+        // Handle search mode
+        if (scroll_view.search_active) {
+            if (ch == 27) {  // ESC - cancel search
+                scroll_view.end_search();
+                needs_redraw = true;
+            } else if (ch == '\n') {  // Enter - finish search
+                scroll_view.end_search();
+                scroll_view.perform_search(preview.lines);
+                needs_redraw = true;
+            } else if (ch == KEY_BACKSPACE || ch == 127) {
+                if (!scroll_view.search_pattern.empty()) {
+                    scroll_view.search_pattern.pop_back();
+                    scroll_view.perform_search(preview.lines);
+                }
+                needs_redraw = true;
+            } else if (ch >= 32 && ch < 127) {  // Printable characters
+                scroll_view.search_pattern += static_cast<char>(ch);
+                scroll_view.perform_search(preview.lines);
+                needs_redraw = true;
+            }
+            
+            if (needs_redraw) {
+                mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+            }
+            return true;
+        }
         
         switch (ch) {
             case KEY_UP:
@@ -1363,6 +1419,18 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
                 
             case '$':
                 scroll_view.move_line_end();
+                break;
+                
+            case '/':  // Start search
+                scroll_view.start_search();
+                break;
+                
+            case 'n':  // Next match
+                scroll_view.next_match();
+                break;
+                
+            case 'N':  // Previous match
+                scroll_view.prev_match();
                 break;
                 
             case '1':  // Switch to quickview tab

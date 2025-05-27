@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <grp.h>
+#include <algorithm>
+#include <cctype>
 
 // ScrollableView implementation
 void ScrollableView::move_up() {
@@ -174,6 +176,119 @@ void ScrollableView::reset() {
     view_offset_y = 0;
     max_line_length = 0;
     line_lengths.clear();
+    search_matches.clear();
+    search_pattern.clear();
+    current_match_index = 0;
+    search_active = false;
+}
+
+// Search implementation
+void ScrollableView::start_search() {
+    search_active = true;
+    search_pattern.clear();
+    search_matches.clear();
+    current_match_index = 0;
+}
+
+void ScrollableView::end_search() {
+    search_active = false;
+    // Keep matches and pattern for navigation with n/N
+}
+
+void ScrollableView::perform_search(const std::vector<std::string>& lines) {
+    search_matches.clear();
+    current_match_index = 0;
+    
+    if (search_pattern.empty()) {
+        return;
+    }
+    
+    // Convert search pattern to lowercase for case-insensitive search
+    std::string lower_pattern = search_pattern;
+    std::transform(lower_pattern.begin(), lower_pattern.end(), lower_pattern.begin(), ::tolower);
+    
+    // Search through all lines
+    for (size_t line_idx = 0; line_idx < lines.size(); line_idx++) {
+        const std::string& line = lines[line_idx];
+        std::string lower_line = line;
+        std::transform(lower_line.begin(), lower_line.end(), lower_line.begin(), ::tolower);
+        
+        // Find all occurrences in this line
+        size_t pos = 0;
+        while ((pos = lower_line.find(lower_pattern, pos)) != std::string::npos) {
+            search_matches.push_back({line_idx, pos});
+            pos += lower_pattern.length();
+        }
+    }
+    
+    // If we have matches, move to the first one
+    if (!search_matches.empty()) {
+        // Find the closest match to current cursor position
+        size_t best_match = 0;
+        size_t min_distance = SIZE_MAX;
+        
+        for (size_t i = 0; i < search_matches.size(); i++) {
+            size_t line_dist = (search_matches[i].line > cursor_y) ? 
+                              search_matches[i].line - cursor_y : 
+                              cursor_y - search_matches[i].line;
+            size_t col_dist = (search_matches[i].column > cursor_x) ? 
+                             search_matches[i].column - cursor_x : 
+                             cursor_x - search_matches[i].column;
+            size_t distance = line_dist * 1000 + col_dist;  // Prioritize line distance
+            
+            if (distance < min_distance) {
+                min_distance = distance;
+                best_match = i;
+            }
+        }
+        
+        current_match_index = best_match;
+        move_to_match(current_match_index);
+    }
+}
+
+void ScrollableView::next_match() {
+    if (search_matches.empty()) return;
+    
+    current_match_index = (current_match_index + 1) % search_matches.size();
+    move_to_match(current_match_index);
+}
+
+void ScrollableView::prev_match() {
+    if (search_matches.empty()) return;
+    
+    if (current_match_index == 0) {
+        current_match_index = search_matches.size() - 1;
+    } else {
+        current_match_index--;
+    }
+    move_to_match(current_match_index);
+}
+
+void ScrollableView::move_to_match(size_t match_index) {
+    if (match_index >= search_matches.size()) return;
+    
+    const SearchMatch& match = search_matches[match_index];
+    cursor_y = match.line;
+    cursor_x = match.column;
+    
+    // Center the match in the view if possible
+    if (window_height > 0) {
+        size_t target_offset_y = (match.line > window_height / 2) ? 
+                                match.line - window_height / 2 : 0;
+        if (target_offset_y + window_height > content_height) {
+            view_offset_y = content_height > window_height ? content_height - window_height : 0;
+        } else {
+            view_offset_y = target_offset_y;
+        }
+    }
+    
+    // Ensure horizontal visibility
+    if (cursor_x < view_offset_x) {
+        view_offset_x = cursor_x;
+    } else if (cursor_x >= view_offset_x + window_width) {
+        view_offset_x = cursor_x > window_width ? cursor_x - window_width / 2 : 0;
+    }
 }
 
 // Helper to format file size
