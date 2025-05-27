@@ -63,6 +63,10 @@ struct ScrollableView {
     size_t current_match_index = 0;
     bool search_active = false;
     
+    // Command mode
+    bool command_active = false;
+    std::string command_buffer;
+    
     // Navigation methods
     void move_up();
     void move_down();
@@ -100,6 +104,12 @@ struct ScrollableView {
     bool has_matches() const { return !search_matches.empty(); }
     size_t get_match_count() const { return search_matches.size(); }
     size_t get_current_match_index() const { return current_match_index; }
+    
+    // Command mode methods
+    void start_command();
+    void end_command();
+    void execute_command();
+    void goto_line(size_t line_number);
 };
 
 class QuickView {

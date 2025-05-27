@@ -351,21 +351,31 @@ void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
         }
     }
     
-    // Show cursor position and search info in status line
+    // Show cursor position, search info, or command mode in status line
     if (has_focus) {
-        std::string cursor_info = "Line " + std::to_string(scroll_view.cursor_y + 1) + "/" + 
-                                 std::to_string(preview.lines.size()) + 
-                                 " Col " + std::to_string(scroll_view.cursor_x + 1);
+        wmove(win, height - 2, 2);
+        wclrtoeol(win);
+        mvwhline(win, height - 2, width - 1, ACS_VLINE, 1);  // Restore right border
         
-        // Add search info
-        if (scroll_view.search_active) {
-            cursor_info += " Search: " + scroll_view.search_pattern + "_";
-        } else if (scroll_view.has_matches()) {
-            cursor_info += " [" + std::to_string(scroll_view.get_current_match_index() + 1) + 
-                          "/" + std::to_string(scroll_view.get_match_count()) + "]";
+        if (scroll_view.command_active) {
+            // Show command prompt
+            std::string command_prompt = ":" + scroll_view.command_buffer + "_";
+            mvwprintw(win, height - 2, 2, "%s", command_prompt.c_str());
+        } else {
+            std::string cursor_info = "Line " + std::to_string(scroll_view.cursor_y + 1) + "/" + 
+                                     std::to_string(preview.lines.size()) + 
+                                     " Col " + std::to_string(scroll_view.cursor_x + 1);
+            
+            // Add search info
+            if (scroll_view.search_active) {
+                cursor_info += " Search: " + scroll_view.search_pattern + "_";
+            } else if (scroll_view.has_matches()) {
+                cursor_info += " [" + std::to_string(scroll_view.get_current_match_index() + 1) + 
+                              "/" + std::to_string(scroll_view.get_match_count()) + "]";
+            }
+            
+            mvwprintw(win, height - 2, 2, "%s", cursor_info.c_str());
         }
-        
-        mvwprintw(win, height - 2, 2, "%s", cursor_info.c_str());
     }
 }
 
@@ -1345,6 +1355,30 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
         const PreviewContent& preview = mark_pane.get_tab_manager().get_cached_preview();
         bool needs_redraw = true;
         
+        // Handle command mode
+        if (scroll_view.command_active) {
+            if (ch == 27) {  // ESC - cancel command
+                scroll_view.end_command();
+                needs_redraw = true;
+            } else if (ch == '\n') {  // Enter - execute command
+                scroll_view.execute_command();
+                needs_redraw = true;
+            } else if (ch == KEY_BACKSPACE || ch == 127) {
+                if (!scroll_view.command_buffer.empty()) {
+                    scroll_view.command_buffer.pop_back();
+                }
+                needs_redraw = true;
+            } else if (ch >= 32 && ch < 127) {  // Printable characters
+                scroll_view.command_buffer += static_cast<char>(ch);
+                needs_redraw = true;
+            }
+            
+            if (needs_redraw) {
+                mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+            }
+            return true;
+        }
+        
         // Handle search mode
         if (scroll_view.search_active) {
             if (ch == 27) {  // ESC - cancel search
@@ -1423,6 +1457,10 @@ bool InteractiveUI::handle_mark_pane_key(int ch) {
                 
             case '/':  // Start search
                 scroll_view.start_search();
+                break;
+                
+            case ':':  // Start command mode
+                scroll_view.start_command();
                 break;
                 
             case 'n':  // Next match

@@ -180,6 +180,8 @@ void ScrollableView::reset() {
     search_pattern.clear();
     current_match_index = 0;
     search_active = false;
+    command_active = false;
+    command_buffer.clear();
 }
 
 // Search implementation
@@ -289,6 +291,76 @@ void ScrollableView::move_to_match(size_t match_index) {
     } else if (cursor_x >= view_offset_x + window_width) {
         view_offset_x = cursor_x > window_width ? cursor_x - window_width / 2 : 0;
     }
+}
+
+// Command mode implementation
+void ScrollableView::start_command() {
+    command_active = true;
+    command_buffer.clear();
+}
+
+void ScrollableView::end_command() {
+    command_active = false;
+    command_buffer.clear();
+}
+
+void ScrollableView::execute_command() {
+    if (command_buffer.empty()) {
+        end_command();
+        return;
+    }
+    
+    // Check for special commands
+    if (command_buffer == "$") {
+        // Go to last line
+        if (content_height > 0) {
+            goto_line(content_height);
+        }
+    } else {
+        // Try to parse as line number
+        try {
+            size_t line_num = std::stoull(command_buffer);
+            if (line_num > 0) {
+                goto_line(line_num);
+            }
+        } catch (...) {
+            // Invalid command, just ignore
+        }
+    }
+    
+    end_command();
+}
+
+void ScrollableView::goto_line(size_t line_number) {
+    // Convert from 1-based to 0-based indexing
+    if (line_number > 0) {
+        line_number--;
+    }
+    
+    // Clamp to valid range
+    if (line_number >= content_height) {
+        line_number = content_height > 0 ? content_height - 1 : 0;
+    }
+    
+    cursor_y = line_number;
+    
+    // Reset cursor x to beginning of line
+    cursor_x = 0;
+    
+    // Center the line in view if possible
+    if (window_height > 0) {
+        if (line_number > window_height / 2) {
+            view_offset_y = line_number - window_height / 2;
+            if (view_offset_y + window_height > content_height) {
+                view_offset_y = content_height > window_height ? content_height - window_height : 0;
+            }
+        } else {
+            view_offset_y = 0;
+        }
+    }
+    
+    // Reset horizontal scroll
+    view_offset_x = 0;
 }
 
 // Helper to format file size
