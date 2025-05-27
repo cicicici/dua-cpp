@@ -303,7 +303,7 @@ void MarkPane::draw_marked_files(WINDOW* win, int height, int width) {
         
         // Truncate path if too long
         int max_path_len = width - path_start - 2;
-        if (path_str.length() > max_path_len) {
+        if (max_path_len > 0 && static_cast<int>(path_str.length()) > max_path_len) {
             path_str = "..." + path_str.substr(path_str.length() - max_path_len + 3);
         }
         
@@ -341,7 +341,7 @@ void MarkPane::draw_marked_files(WINDOW* win, int height, int width) {
     }
     
     // Draw scrollbar if needed
-    if (marked_items.size() > visible_items) {
+    if (static_cast<int>(marked_items.size()) > visible_items) {
         draw_scrollbar(win, height, view_offset, marked_items.size(), visible_items);
     }
     
@@ -976,7 +976,6 @@ void InteractiveUI::update_format_cache(std::shared_ptr<Entry> entry, CachedEntr
 }
 
 void InteractiveUI::update_status_line(WINDOW* win, int height, int width) {
-    (void)width; // Suppress unused parameter warning
     std::string sort_str = "Sort mode: ";
     switch (sort_mode) {
         case SortMode::SIZE_DESC: sort_str += "size descending"; break;
@@ -989,10 +988,29 @@ void InteractiveUI::update_status_line(WINDOW* win, int height, int width) {
         case SortMode::COUNT_ASC: sort_str += "count ascending"; break;
     }
     
+    // Format scan time
+    std::string scan_time_str;
+    if (scan_time_ms > 0) {
+        if (scan_time_ms < 1000) {
+            scan_time_str = "Scan time: " + std::to_string(scan_time_ms) + "ms";
+        } else {
+            scan_time_str = "Scan time: " + std::to_string(scan_time_ms / 1000.0).substr(0, 4) + "s";
+        }
+    }
+    
     wattron(win, A_REVERSE);
     wmove(win, height - 2, 0);
     wclrtoeol(win);
     mvwprintw(win, height - 2, 1, "%s", sort_str.c_str());
+    
+    // Display scan time on the right side
+    if (!scan_time_str.empty()) {
+        int scan_time_x = width - static_cast<int>(scan_time_str.length()) - 1;
+        if (scan_time_x > static_cast<int>(sort_str.length()) + 2) {
+            mvwprintw(win, height - 2, scan_time_x, "%s", scan_time_str.c_str());
+        }
+    }
+    
     wattroff(win, A_REVERSE);
 }
 

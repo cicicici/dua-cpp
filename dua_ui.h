@@ -137,6 +137,9 @@ private:
     
     SortMode sort_mode = SortMode::SIZE_DESC;
     
+    // Scan time tracking
+    long long scan_time_ms = 0;
+    
     // Window management
     void update_window_layout();
     void switch_focus();
@@ -208,6 +211,7 @@ public:
     ~InteractiveUI();
     
     void run();
+    void set_scan_time(long long ms) { scan_time_ms = ms; }
 };
 
 #endif // DUA_UI_H

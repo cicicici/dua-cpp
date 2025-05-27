@@ -282,6 +282,7 @@ int main(int argc, char* argv[]) {
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         
         InteractiveUI ui(roots, config);
+        ui.set_scan_time(duration.count());
         ui.run();
     } else {
         aggregate_mode(config);

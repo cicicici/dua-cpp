@@ -507,6 +507,7 @@ void OptimizedScanner::print_stats() {
 void print_tree_sorted(const std::shared_ptr<Entry>& entry, const Config& config,
                       const std::string& prefix, bool is_last, 
                       int depth, std::vector<std::shared_ptr<Entry>>* siblings) {
+    (void)siblings;  // Suppress unused parameter warning
     if (config.max_depth >= 0 && depth > config.max_depth) return;
     
     std::cout << prefix;
