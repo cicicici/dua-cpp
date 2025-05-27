@@ -263,12 +263,81 @@ void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
     }
     
     const PreviewContent& preview = tab_manager.get_cached_preview();
-    auto formatted = QuickView::format_preview(preview, width - 2, height - 4);
+    ScrollableView& scroll_view = tab_manager.get_scroll_view();
     
-    int y = 3;
-    for (const auto& line : formatted) {
-        if (y >= height - 1) break;
-        mvwprintw(win, y++, 2, "%s", line.c_str());
+    // Update window size (subtract borders, header, and status line)
+    int content_width = width - 4;  // 2 chars padding on each side
+    int content_height = height - 5;  // Header, tabs, borders, and status line
+    scroll_view.update_window_size(content_width, content_height);
+    
+    // Draw content within the visible window
+    size_t start_y = scroll_view.get_visible_start_y();
+    size_t end_y = scroll_view.get_visible_end_y();
+    size_t start_x = scroll_view.get_visible_start_x();
+    
+    int draw_y = 3;  // Start after header and tabs
+    
+    for (size_t line_idx = start_y; line_idx < end_y && line_idx < preview.lines.size() && draw_y < height - 2; line_idx++) {
+        const std::string& line = preview.lines[line_idx];
+        
+        // Clear the line first
+        wmove(win, draw_y, 2);
+        wclrtoeol(win);
+        mvwhline(win, draw_y, width - 1, ACS_VLINE, 1);  // Restore right border
+        
+        // Draw the visible portion of the line
+        if (start_x < line.length()) {
+            std::string visible_part = line.substr(start_x, content_width);
+            
+            // Always draw character by character to preserve spaces
+            for (size_t col = 0; col < visible_part.length() && col < static_cast<size_t>(content_width); col++) {
+                // Highlight cursor position if on this line and focused
+                if (has_focus && line_idx == scroll_view.cursor_y && start_x + col == scroll_view.cursor_x) {
+                    wattron(win, A_REVERSE);
+                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                    wattroff(win, A_REVERSE);
+                } else {
+                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                }
+            }
+        }
+        
+        // Draw cursor on empty lines only
+        if (has_focus && line_idx == scroll_view.cursor_y && line.empty()) {
+            // For empty lines, show cursor at position 0
+            if (scroll_view.cursor_x == 0 && start_x == 0) {
+                wattron(win, A_REVERSE);
+                mvwaddch(win, draw_y, 2, ' ');
+                wattroff(win, A_REVERSE);
+            }
+        }
+        
+        draw_y++;
+    }
+    
+    // Draw scroll indicators if needed
+    if (preview.lines.size() > static_cast<size_t>(content_height) || 
+        scroll_view.max_line_length > static_cast<size_t>(content_width)) {
+        // Vertical scrollbar
+        if (preview.lines.size() > static_cast<size_t>(content_height)) {
+            // Pass height-2 to account for the status line
+            draw_scrollbar(win, height-2, scroll_view.view_offset_y, preview.lines.size(), content_height);
+        }
+        
+        // Horizontal scroll indicator in status line
+        if (scroll_view.view_offset_x > 0 || scroll_view.content_width > static_cast<size_t>(content_width)) {
+            std::string h_scroll = "[" + std::to_string(start_x + 1) + "-" + 
+                                 std::to_string(start_x + content_width) + "]";
+            mvwprintw(win, height - 2, width - h_scroll.length() - 2, "%s", h_scroll.c_str());
+        }
+    }
+    
+    // Show cursor position in status line
+    if (has_focus) {
+        std::string cursor_info = "Line " + std::to_string(scroll_view.cursor_y + 1) + "/" + 
+                                 std::to_string(preview.lines.size()) + 
+                                 " Col " + std::to_string(scroll_view.cursor_x + 1);
+        mvwprintw(win, height - 2, 2, "%s", cursor_info.c_str());
     }
 }
 
@@ -1242,6 +1311,89 @@ bool InteractiveUI::handle_key(int ch) {
 }
 
 bool InteractiveUI::handle_mark_pane_key(int ch) {
+    // Check if we're in quickview mode and handle navigation differently
+    if (mark_pane.get_current_tab() == MarkPaneTab::QUICKVIEW && mark_pane.is_quickview_active()) {
+        ScrollableView& scroll_view = mark_pane.get_tab_manager().get_scroll_view();
+        bool needs_redraw = true;
+        
+        switch (ch) {
+            case KEY_UP:
+            case 'k':
+                scroll_view.move_up();
+                break;
+                
+            case KEY_DOWN:
+            case 'j':
+                scroll_view.move_down();
+                break;
+                
+            case KEY_LEFT:
+            case 'h':
+                scroll_view.move_left();
+                break;
+                
+            case KEY_RIGHT:
+            case 'l':
+                scroll_view.move_right();
+                break;
+                
+            case KEY_PPAGE:  // Page Up
+            case 'b':
+                scroll_view.page_up();
+                break;
+                
+            case KEY_NPAGE:  // Page Down
+            case 'f':
+                scroll_view.page_down();
+                break;
+                
+            case KEY_HOME:
+            case 'g':
+                scroll_view.move_home();
+                break;
+                
+            case KEY_END:
+            case 'G':
+                scroll_view.move_end();
+                break;
+                
+            case '0':
+                scroll_view.move_line_start();
+                break;
+                
+            case '$':
+                scroll_view.move_line_end();
+                break;
+                
+            case '1':  // Switch to quickview tab
+            case '2':  // Switch to marked files tab
+                // Fall through to regular tab switching
+                needs_redraw = true;
+                break;
+                
+            case 'q':
+            case 'Q':
+            case 27:  // ESC
+                // Fall through to regular handling
+                needs_redraw = false;
+                break;
+                
+            default:
+                needs_redraw = false;
+                break;
+        }
+        
+        if (needs_redraw) {
+            mark_pane.draw(mark_win, getmaxy(mark_win), getmaxx(mark_win));
+            return true;
+        } else if (ch == 'q' || ch == 'Q' || ch == 27 || ch == '1' || ch == '2') {
+            // Continue to regular handling for these keys
+        } else {
+            return true;  // Consume other keys in quickview mode
+        }
+    }
+    
+    // Regular mark pane key handling
     switch (ch) {
         case '1':  // Switch to quickview tab
             mark_pane.switch_tab(1);

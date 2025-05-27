@@ -34,10 +34,57 @@ struct PreviewContent {
     std::string mime_type;
 };
 
+// Scrollable view state for quick view
+struct ScrollableView {
+    size_t cursor_x = 0;        // Horizontal cursor position
+    size_t cursor_y = 0;        // Vertical cursor position
+    size_t view_offset_x = 0;   // Horizontal scroll offset
+    size_t view_offset_y = 0;   // Vertical scroll offset
+    size_t max_line_length = 0; // Maximum line length in content
+    
+    // Window dimensions
+    size_t window_width = 0;
+    size_t window_height = 0;
+    
+    // Content dimensions
+    size_t content_width = 0;
+    size_t content_height = 0;
+    
+    // Store line lengths for proper cursor movement
+    std::vector<size_t> line_lengths;
+    
+    // Navigation methods
+    void move_up();
+    void move_down();
+    void move_left();
+    void move_right();
+    void page_up();
+    void page_down();
+    void move_home();
+    void move_end();
+    void move_line_start();
+    void move_line_end();
+    
+    // Update window size
+    void update_window_size(size_t width, size_t height);
+    
+    // Update content info
+    void update_content_info(const std::vector<std::string>& lines);
+    
+    // Get visible range
+    size_t get_visible_start_y() const { return view_offset_y; }
+    size_t get_visible_end_y() const { return std::min(view_offset_y + window_height, content_height); }
+    size_t get_visible_start_x() const { return view_offset_x; }
+    size_t get_visible_end_x() const { return view_offset_x + window_width; }
+    
+    // Reset state
+    void reset();
+};
+
 class QuickView {
 private:
-    static constexpr size_t MAX_PREVIEW_LINES = 100;
-    static constexpr size_t MAX_LINE_LENGTH = 256;
+    static constexpr size_t MAX_PREVIEW_LINES = 10000;  // Much larger for scrollable view
+    static constexpr size_t MAX_LINE_LENGTH = 4096;     // Much longer lines supported
     static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
     
     // File type detection
@@ -78,6 +125,7 @@ private:
     bool quickview_active = false;
     fs::path current_preview_path;
     PreviewContent cached_preview;
+    ScrollableView scroll_view;
     
 public:
     void switch_to_tab(int tab_number);
@@ -88,6 +136,8 @@ public:
     void deactivate_quickview();
     
     const PreviewContent& get_cached_preview() const { return cached_preview; }
+    ScrollableView& get_scroll_view() { return scroll_view; }
+    const ScrollableView& get_scroll_view() const { return scroll_view; }
     void update_preview(const fs::path& path);
 };
 

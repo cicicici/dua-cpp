@@ -6,6 +6,176 @@
 #include <pwd.h>
 #include <grp.h>
 
+// ScrollableView implementation
+void ScrollableView::move_up() {
+    if (cursor_y > 0) {
+        cursor_y--;
+        
+        // Adjust cursor_x if new line is shorter
+        if (cursor_y < line_lengths.size()) {
+            size_t line_len = line_lengths[cursor_y];
+            if (line_len == 0) {
+                cursor_x = 0;  // Empty line
+            } else if (cursor_x >= line_len) {
+                cursor_x = line_len - 1;  // Stay at last character
+            }
+        }
+        
+        // Adjust view if cursor moves above visible area
+        if (cursor_y < view_offset_y) {
+            view_offset_y = cursor_y;
+        }
+    }
+}
+
+void ScrollableView::move_down() {
+    if (cursor_y < content_height - 1) {
+        cursor_y++;
+        
+        // Adjust cursor_x if new line is shorter
+        if (cursor_y < line_lengths.size()) {
+            size_t line_len = line_lengths[cursor_y];
+            if (line_len == 0) {
+                cursor_x = 0;  // Empty line
+            } else if (cursor_x >= line_len) {
+                cursor_x = line_len - 1;  // Stay at last character
+            }
+        }
+        
+        // Adjust view if cursor moves below visible area
+        if (cursor_y >= view_offset_y + window_height) {
+            view_offset_y = cursor_y - window_height + 1;
+        }
+    }
+}
+
+void ScrollableView::move_left() {
+    if (cursor_x > 0) {
+        cursor_x--;
+        // Adjust view if cursor moves left of visible area
+        if (cursor_x < view_offset_x) {
+            view_offset_x = cursor_x;
+        }
+    }
+}
+
+void ScrollableView::move_right() {
+    // Limit cursor to last character (not past it)
+    size_t current_line_length = 0;
+    if (cursor_y < line_lengths.size()) {
+        current_line_length = line_lengths[cursor_y];
+    }
+    
+    // For non-empty lines, stop at last character
+    if (current_line_length > 0 && cursor_x < current_line_length - 1) {
+        cursor_x++;
+        // Adjust view if cursor moves right of visible area
+        if (cursor_x >= view_offset_x + window_width) {
+            view_offset_x = cursor_x - window_width + 1;
+        }
+    }
+    // For empty lines, cursor stays at position 0
+}
+
+void ScrollableView::page_up() {
+    if (cursor_y >= window_height) {
+        cursor_y -= window_height;
+        view_offset_y = (view_offset_y >= window_height) ? view_offset_y - window_height : 0;
+    } else {
+        cursor_y = 0;
+        view_offset_y = 0;
+    }
+}
+
+void ScrollableView::page_down() {
+    cursor_y = std::min(cursor_y + window_height, content_height - 1);
+    
+    // Adjust view to show cursor
+    if (cursor_y >= view_offset_y + window_height) {
+        view_offset_y = std::min(cursor_y - window_height + 1, 
+                                 content_height > window_height ? content_height - window_height : 0);
+    }
+}
+
+void ScrollableView::move_home() {
+    cursor_y = 0;
+    view_offset_y = 0;
+}
+
+void ScrollableView::move_end() {
+    cursor_y = content_height > 0 ? content_height - 1 : 0;
+    view_offset_y = content_height > window_height ? content_height - window_height : 0;
+}
+
+void ScrollableView::move_line_start() {
+    cursor_x = 0;
+    view_offset_x = 0;
+}
+
+void ScrollableView::move_line_end() {
+    // Move to last character (not after it)
+    if (cursor_y < line_lengths.size() && line_lengths[cursor_y] > 0) {
+        cursor_x = line_lengths[cursor_y] - 1;  // Position at last character
+    } else {
+        cursor_x = 0;  // Empty line stays at 0
+    }
+    
+    // Adjust view to show cursor
+    if (cursor_x >= view_offset_x + window_width) {
+        view_offset_x = cursor_x > window_width ? cursor_x - window_width + 1 : 0;
+    }
+}
+
+void ScrollableView::update_window_size(size_t width, size_t height) {
+    window_width = width;
+    window_height = height;
+    
+    // Adjust view offsets if necessary
+    if (view_offset_y + window_height > content_height && content_height > 0) {
+        view_offset_y = content_height > window_height ? content_height - window_height : 0;
+    }
+    if (view_offset_x + window_width > content_width && content_width > 0) {
+        view_offset_x = content_width > window_width ? content_width - window_width : 0;
+    }
+}
+
+void ScrollableView::update_content_info(const std::vector<std::string>& lines) {
+    content_height = lines.size();
+    max_line_length = 0;
+    line_lengths.clear();
+    line_lengths.reserve(lines.size());
+    
+    for (const auto& line : lines) {
+        line_lengths.push_back(line.length());
+        max_line_length = std::max(max_line_length, line.length());
+    }
+    
+    content_width = max_line_length;  // Limit to actual content width
+    
+    // Reset cursor and view if out of bounds
+    if (cursor_y >= content_height) {
+        cursor_y = content_height > 0 ? content_height - 1 : 0;
+    }
+    // Don't limit cursor_x anymore - allow free movement
+    
+    // Adjust view offsets
+    if (view_offset_y + window_height > content_height) {
+        view_offset_y = content_height > window_height ? content_height - window_height : 0;
+    }
+    if (view_offset_x + window_width > content_width) {
+        view_offset_x = content_width > window_width ? content_width - window_width : 0;
+    }
+}
+
+void ScrollableView::reset() {
+    cursor_x = 0;
+    cursor_y = 0;
+    view_offset_x = 0;
+    view_offset_y = 0;
+    max_line_length = 0;
+    line_lengths.clear();
+}
+
 // Helper to format file size
 std::string QuickView::format_size(uintmax_t size) {
     const char* units[] = {"B", "KB", "MB", "GB", "TB"};
@@ -370,15 +540,19 @@ void TabManager::activate_quickview(const fs::path& path) {
     quickview_active = true;
     current_preview_path = path;
     update_preview(path);
+    scroll_view.reset();
+    scroll_view.update_content_info(cached_preview.lines);
 }
 
 void TabManager::deactivate_quickview() {
     quickview_active = false;
     current_preview_path.clear();
     cached_preview = PreviewContent();
+    scroll_view.reset();
 }
 
 void TabManager::update_preview(const fs::path& path) {
     current_preview_path = path;
     cached_preview = QuickView::generate_preview(path);
+    scroll_view.update_content_info(cached_preview.lines);
 }

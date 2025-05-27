@@ -95,6 +95,7 @@ public:
     void deactivate_quickview();
     bool is_quickview_active() const;
     MarkPaneTab get_current_tab() const;
+    TabManager& get_tab_manager() { return tab_manager; }
 };
 
 // Interactive UI class
