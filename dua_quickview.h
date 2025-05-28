@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include <sys/stat.h>
+#include <ncurses.h>
 
 namespace fs = std::filesystem;
 
@@ -24,14 +25,28 @@ enum class PreviewType {
     ERROR
 };
 
+// Structure to hold styled text
+struct StyledChar {
+    char ch;
+    int color_pair;
+    int attrs;  // bold, underline, etc.
+};
+
+struct StyledLine {
+    std::string plain_text;
+    std::vector<StyledChar> styled_chars;
+};
+
 // Structure to hold preview content
 struct PreviewContent {
     PreviewType type;
     std::vector<std::string> lines;
+    std::vector<StyledLine> styled_lines;  // For syntax highlighted content
     std::string error_message;
     size_t total_lines;
     size_t file_size;
     std::string mime_type;
+    bool has_highlighting = false;
 };
 
 // Scrollable view state for quick view
@@ -126,10 +141,15 @@ private:
     
     // Preview generators
     static PreviewContent preview_text_file(const fs::path& path);
+    static PreviewContent preview_text_file_with_highlighting(const fs::path& path);
     static PreviewContent preview_directory(const fs::path& path);
     static PreviewContent preview_binary_file(const fs::path& path);
     static PreviewContent preview_image_file(const fs::path& path);
     static PreviewContent preview_archive_file(const fs::path& path);
+    
+    // Helper to check if external highlighter is available
+    static bool has_syntax_highlighter();
+    static std::string strip_ansi_codes(const std::string& text);
     
     // Helper functions
     static std::string format_size(uintmax_t size);

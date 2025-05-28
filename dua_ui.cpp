@@ -287,36 +287,84 @@ void MarkPane::draw_quickview(WINDOW* win, int height, int width) {
         
         // Draw the visible portion of the line
         if (start_x < line.length()) {
-            std::string visible_part = line.substr(start_x, content_width);
+            // Check if we have syntax highlighting for this line
+            bool use_styling = preview.has_highlighting && line_idx < preview.styled_lines.size();
             
-            // Always draw character by character to preserve spaces
-            for (size_t col = 0; col < visible_part.length() && col < static_cast<size_t>(content_width); col++) {
-                bool is_cursor = has_focus && line_idx == scroll_view.cursor_y && start_x + col == scroll_view.cursor_x;
-                bool is_match = false;
+            if (use_styling) {
+                // Draw with syntax highlighting
+                const StyledLine& styled_line = preview.styled_lines[line_idx];
+                size_t draw_col = 0;
                 
-                // Check if this position is part of a search match
-                if (!scroll_view.search_pattern.empty()) {
-                    for (const auto& match : scroll_view.search_matches) {
-                        if (match.line == line_idx && 
-                            start_x + col >= match.column && 
-                            start_x + col < match.column + scroll_view.search_pattern.length()) {
-                            is_match = true;
-                            break;
+                for (size_t col = start_x; col < styled_line.styled_chars.size() && draw_col < static_cast<size_t>(content_width); col++) {
+                    const StyledChar& sc = styled_line.styled_chars[col];
+                    bool is_cursor = has_focus && line_idx == scroll_view.cursor_y && col == scroll_view.cursor_x;
+                    bool is_match = false;
+                    
+                    // Check if this position is part of a search match
+                    if (!scroll_view.search_pattern.empty()) {
+                        for (const auto& match : scroll_view.search_matches) {
+                            if (match.line == line_idx && 
+                                col >= match.column && 
+                                col < match.column + scroll_view.search_pattern.length()) {
+                                is_match = true;
+                                break;
+                            }
                         }
                     }
+                    
+                    // Apply highlighting
+                    if (is_cursor) {
+                        wattron(win, A_REVERSE);
+                        mvwaddch(win, draw_y, 2 + draw_col, sc.ch);
+                        wattroff(win, A_REVERSE);
+                    } else if (is_match) {
+                        wattron(win, COLOR_PAIR(6) | A_BOLD);  // Yellow bold for matches
+                        mvwaddch(win, draw_y, 2 + draw_col, sc.ch);
+                        wattroff(win, COLOR_PAIR(6) | A_BOLD);
+                    } else {
+                        // Use syntax highlighting colors
+                        if (sc.color_pair > 0) {
+                            wattron(win, COLOR_PAIR(sc.color_pair) | sc.attrs);
+                            mvwaddch(win, draw_y, 2 + draw_col, sc.ch);
+                            wattroff(win, COLOR_PAIR(sc.color_pair) | sc.attrs);
+                        } else {
+                            mvwaddch(win, draw_y, 2 + draw_col, sc.ch);
+                        }
+                    }
+                    draw_col++;
                 }
+            } else {
+                // Fallback to plain text drawing
+                std::string visible_part = line.substr(start_x, content_width);
                 
-                // Apply highlighting
-                if (is_cursor) {
-                    wattron(win, A_REVERSE);
-                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
-                    wattroff(win, A_REVERSE);
-                } else if (is_match) {
-                    wattron(win, COLOR_PAIR(6) | A_BOLD);  // Yellow bold for matches
-                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
-                    wattroff(win, COLOR_PAIR(6) | A_BOLD);
-                } else {
-                    mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                for (size_t col = 0; col < visible_part.length() && col < static_cast<size_t>(content_width); col++) {
+                    bool is_cursor = has_focus && line_idx == scroll_view.cursor_y && start_x + col == scroll_view.cursor_x;
+                    bool is_match = false;
+                    
+                    // Check if this position is part of a search match
+                    if (!scroll_view.search_pattern.empty()) {
+                        for (const auto& match : scroll_view.search_matches) {
+                            if (match.line == line_idx && 
+                                start_x + col >= match.column && 
+                                start_x + col < match.column + scroll_view.search_pattern.length()) {
+                                is_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Apply highlighting
+                    if (is_cursor) {
+                        wattron(win, A_REVERSE);
+                        mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                        wattroff(win, A_REVERSE);
+                    } else if (is_match) {
+                        wattron(win, COLOR_PAIR(6) | A_BOLD);  // Yellow bold for matches
+                        mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                        wattroff(win, COLOR_PAIR(6) | A_BOLD);
+                    } else {
+                        mvwaddch(win, draw_y, 2 + col, visible_part[col]);
+                    }
                 }
             }
         }
@@ -499,16 +547,41 @@ void InteractiveUI::run() {
     
     if (has_colors()) {
         start_color();
-        init_pair(1, COLOR_CYAN, COLOR_BLACK);
-        init_pair(2, COLOR_WHITE, COLOR_BLACK);
-        init_pair(3, COLOR_GREEN, COLOR_BLACK);
+        
+        // Enable default terminal colors
+        use_default_colors();
+        
+        init_pair(1, COLOR_CYAN, -1);
+        init_pair(2, COLOR_WHITE, -1);
+        init_pair(3, COLOR_GREEN, -1);
         init_pair(4, COLOR_BLACK, COLOR_CYAN);
-        init_pair(5, COLOR_WHITE, COLOR_BLACK);
-        init_pair(6, COLOR_YELLOW, COLOR_BLACK);
-        init_pair(7, COLOR_BLUE, COLOR_BLACK);
-        init_pair(8, COLOR_RED, COLOR_BLACK);
-        init_pair(9, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(5, COLOR_WHITE, -1);
+        init_pair(6, COLOR_YELLOW, -1);
+        init_pair(7, COLOR_BLUE, -1);
+        init_pair(8, COLOR_RED, -1);
+        init_pair(9, COLOR_MAGENTA, -1);
         init_pair(10, COLOR_BLACK, COLOR_BLUE);  // Unfocused selection
+        
+        // Additional colors for syntax highlighting
+        // Use brighter versions with A_BOLD attribute for better visibility
+        init_pair(16, COLOR_BLACK, -1);
+        init_pair(17, COLOR_RED, -1);      // Keywords, errors
+        init_pair(18, COLOR_GREEN, -1);    // Strings, success
+        init_pair(19, COLOR_YELLOW, -1);   // Warnings, numbers
+        init_pair(20, COLOR_BLUE, -1);     // Types, functions
+        init_pair(21, COLOR_MAGENTA, -1);  // Preprocessor
+        init_pair(22, COLOR_CYAN, -1);     // Comments
+        init_pair(23, COLOR_WHITE, -1);    // Default text
+        
+        // Bright versions (we'll use A_BOLD to make them bright)
+        init_pair(24, COLOR_WHITE, -1);    // Bright black (gray)
+        init_pair(25, COLOR_RED, -1);      // Bright red
+        init_pair(26, COLOR_GREEN, -1);    // Bright green
+        init_pair(27, COLOR_YELLOW, -1);   // Bright yellow
+        init_pair(28, COLOR_BLUE, -1);     // Bright blue
+        init_pair(29, COLOR_MAGENTA, -1);  // Bright magenta
+        init_pair(30, COLOR_CYAN, -1);     // Bright cyan
+        init_pair(31, COLOR_WHITE, -1);    // Bright white
     }
     
     update_window_layout();

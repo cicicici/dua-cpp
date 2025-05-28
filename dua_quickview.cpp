@@ -7,6 +7,9 @@
 #include <grp.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <map>
+#include <sstream>
 
 // ScrollableView implementation
 void ScrollableView::move_up() {
@@ -472,6 +475,230 @@ void ScrollableView::goto_line(size_t line_number) {
     }
 }
 
+// Check if syntax highlighter (bat) is available
+bool QuickView::has_syntax_highlighter() {
+    static int has_bat = -1;  // Cache the result
+    if (has_bat == -1) {
+        has_bat = (system("which bat > /dev/null 2>&1") == 0) ? 1 : 0;
+    }
+    return has_bat == 1;
+}
+
+// Map RGB colors to closest ncurses color
+int rgb_to_curses_color(int r, int g, int b) {
+    // More sophisticated color mapping for syntax highlighting
+    
+    // Special cases for common syntax highlighting colors from Monokai theme
+    
+    // Keywords (bright magenta/pink) - RGB(249, 38, 114)
+    if (r > 240 && r < 255 && g < 50 && b > 100 && b < 120) return 21;
+    
+    // Strings (yellow) - RGB(230, 219, 116)
+    if (r > 220 && r < 240 && g > 210 && g < 230 && b > 110 && b < 130) return 19;
+    
+    // Comments (gray) - RGB(117, 113, 94)
+    if (r > 110 && r < 125 && g > 105 && g < 120 && b > 85 && b < 100) return 24;
+    
+    // Types/Classes (cyan) - RGB(102, 217, 239)
+    if (r > 95 && r < 110 && g > 210 && g < 225 && b > 230) return 22;
+    
+    // Functions (green) - RGB(166, 226, 46)
+    if (r > 160 && r < 175 && g > 220 && g < 235 && b < 60) return 18;
+    
+    // Variables (orange) - RGB(253, 151, 31)
+    if (r > 245 && g > 145 && g < 160 && b < 40) return 27;
+    
+    // Regular text (off-white) - RGB(248, 248, 242)
+    if (r > 240 && g > 240 && b > 235) return 23;
+    
+    // Calculate color characteristics for general mapping
+    int max_val = std::max({r, g, b});
+    int min_val = std::min({r, g, b});
+    int range = max_val - min_val;
+    int luminance = (r * 299 + g * 587 + b * 114) / 1000;
+    
+    // Pure black
+    if (max_val < 30) return 16;
+    
+    // Gray scale (low saturation)
+    if (range < 30) {
+        if (luminance > 200) return 23;  // White
+        if (luminance > 150) return 31;  // Bright white
+        if (luminance > 100) return 24;  // Gray
+        if (luminance > 50) return 16;   // Dark gray
+        return 16;  // Black
+    }
+    
+    // High saturation colors
+    if (r > g && r > b) {
+        // Red dominant
+        if (r - g > 80 && r - b > 80) return 17;  // Pure red
+        if (r > 200 && g > 150) return 19;  // Yellow/orange
+        if (r > 150 && b > 100) return 21;  // Magenta
+    } else if (g > r && g > b) {
+        // Green dominant
+        if (g - r > 80 && g - b > 80) return 18;  // Pure green
+        if (g > 200 && b > 150) return 22;  // Cyan
+        if (g > 150 && r > 100) return 19;  // Yellow-green
+    } else if (b > r && b > g) {
+        // Blue dominant
+        if (b - r > 80 && b - g > 80) return 20;  // Pure blue
+        if (b > 200 && g > 150) return 22;  // Cyan
+        if (b > 150 && r > 100) return 21;  // Magenta/purple
+    }
+    
+    // Default based on luminance
+    return luminance > 150 ? 23 : 24;
+}
+
+// Parse ANSI escape codes and create styled lines
+std::vector<StyledLine> parse_ansi_text(const std::string& ansi_text) {
+    std::vector<StyledLine> result;
+    std::istringstream stream(ansi_text);
+    std::string line;
+    
+    while (std::getline(stream, line)) {
+        StyledLine styled_line;
+        styled_line.plain_text = "";
+        
+        size_t pos = 0;
+        int current_color = 0;
+        int current_attrs = 0;
+        
+        while (pos < line.length()) {
+            if (line[pos] == '\033' && pos + 1 < line.length() && line[pos + 1] == '[') {
+                // Parse ANSI escape sequence
+                pos += 2;
+                std::string code;
+                while (pos < line.length() && line[pos] != 'm') {
+                    code += line[pos++];
+                }
+                pos++; // Skip 'm'
+                
+                // Parse SGR parameters
+                std::vector<int> params;
+                std::istringstream code_stream(code);
+                std::string param;
+                while (std::getline(code_stream, param, ';')) {
+                    try {
+                        params.push_back(std::stoi(param));
+                    } catch (...) {
+                        // Ignore invalid parameters
+                    }
+                }
+                
+                // Process parameters
+                for (size_t i = 0; i < params.size(); i++) {
+                    int val = params[i];
+                    if (val == 0) {
+                        current_color = 0;
+                        current_attrs = 0;
+                    } else if (val == 1) {
+                        current_attrs |= A_BOLD;
+                    } else if (val == 4) {
+                        current_attrs |= A_UNDERLINE;
+                    } else if (val == 38 && i + 4 < params.size() && params[i + 1] == 2) {
+                        // 24-bit RGB color: 38;2;R;G;B
+                        int r = params[i + 2];
+                        int g = params[i + 3];
+                        int b = params[i + 4];
+                        current_color = rgb_to_curses_color(r, g, b);
+                        // Debug: Log the color mapping
+                        // fprintf(stderr, "RGB(%d,%d,%d) -> Color %d\n", r, g, b, current_color);
+                        i += 4; // Skip the RGB values
+                    } else if (val >= 30 && val <= 37) {
+                        // Basic 16-color ANSI
+                        current_color = 16 + (val - 30);
+                    } else if (val >= 90 && val <= 97) {
+                        // Bright 16-color ANSI
+                        current_color = 24 + (val - 90);
+                    }
+                }
+            } else {
+                // Regular character
+                StyledChar sc;
+                sc.ch = line[pos];
+                sc.color_pair = current_color;
+                sc.attrs = current_attrs;
+                styled_line.styled_chars.push_back(sc);
+                styled_line.plain_text += line[pos];
+                pos++;
+            }
+        }
+        
+        result.push_back(styled_line);
+    }
+    
+    return result;
+}
+
+// Strip ANSI codes for plain text
+std::string QuickView::strip_ansi_codes(const std::string& text) {
+    std::string result;
+    bool in_escape = false;
+    
+    for (size_t i = 0; i < text.length(); i++) {
+        if (text[i] == '\033' && i + 1 < text.length() && text[i + 1] == '[') {
+            in_escape = true;
+            i++; // Skip '['
+        } else if (in_escape && text[i] == 'm') {
+            in_escape = false;
+        } else if (!in_escape) {
+            result += text[i];
+        }
+    }
+    
+    return result;
+}
+
+// Preview text file with syntax highlighting
+PreviewContent QuickView::preview_text_file_with_highlighting(const fs::path& path) {
+    PreviewContent content;
+    content.type = PreviewType::TEXT;
+    
+    try {
+        // Use bat for syntax highlighting
+        // Escape the file path for shell
+        std::string escaped_path = "'" + path.string() + "'";
+        // Use Monokai Extended theme for richer syntax highlighting
+        std::string cmd = "bat --color=always --style=plain --theme='Monokai Extended' --paging=never --line-range=1:" + 
+                         std::to_string(MAX_PREVIEW_LINES) + " " + escaped_path + " 2>/dev/null";
+        
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            return preview_text_file(path);  // Fallback to plain text
+        }
+        
+        std::string result;
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            result += buffer;
+        }
+        pclose(pipe);
+        
+        if (result.empty()) {
+            return preview_text_file(path);  // Fallback to plain text
+        }
+        
+        // Parse ANSI codes
+        content.styled_lines = parse_ansi_text(result);
+        content.has_highlighting = true;
+        
+        // Also store plain text for search functionality
+        for (const auto& styled_line : content.styled_lines) {
+            content.lines.push_back(styled_line.plain_text);
+        }
+        
+        content.total_lines = content.lines.size();
+        content.file_size = fs::file_size(path);
+        
+    } catch (...) {
+        return preview_text_file(path);  // Fallback to plain text
+    }
+    
+    return content;
+}
+
 // Helper to format file size
 std::string QuickView::format_size(uintmax_t size) {
     const char* units[] = {"B", "KB", "MB", "GB", "TB"};
@@ -773,6 +1000,10 @@ PreviewContent QuickView::generate_preview(const fs::path& path) {
     
     switch (type) {
         case PreviewType::TEXT:
+            // Try syntax highlighting first if available
+            if (has_syntax_highlighter()) {
+                return preview_text_file_with_highlighting(path);
+            }
             return preview_text_file(path);
         case PreviewType::DIRECTORY:
             return preview_directory(path);
